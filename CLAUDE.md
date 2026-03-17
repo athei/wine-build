@@ -20,7 +20,7 @@ Two scripts run sequentially — build first, then bundle:
 
 **build-wine.sh** — Configures and compiles Wine from `../src` into `../build`. Uses Homebrew x86_64 deps from `/usr/local/`. Incremental by default (preserves `../build` between runs). Pass `--clean` to wipe the build directory first for a full rebuild.
 
-**bundle-wine.sh** — Takes the build output and creates a distributable `wine/` tree plus `.tar.gz`. Requires `--dest <dir>`. Steps: staged install → flatten prefix → bundle dylibs (copy, fix install names with `@loader_path`) → compile launcher → create archive.
+**bundle-wine.sh** — Takes the build output and creates a distributable `wine/` tree. Requires `--dest <dir>`. Steps: staged install → flatten prefix → bundle dylibs (copy, fix install names with `@loader_path`) → compile launcher → verify.
 
 ## Launcher Architecture
 

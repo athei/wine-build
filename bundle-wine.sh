@@ -167,13 +167,6 @@ done
 
 echo "  Testing: $("$WINE_DIR/bin/wine" --version 2>/dev/null || echo 'FAILED')"
 
-# ── Step 5: Create archive ──────────────────────────────────────────────
-echo "==> Step 5: Create archive"
-cd "$DIST_DIR"
-tar -czf "wine-${WINE_VERSION}-x86_64-macos.tar.gz" wine/
-ls -lh "wine-${WINE_VERSION}-x86_64-macos.tar.gz"
-
 echo ""
 echo "==> Done! Distribution is at:"
 echo "    $DIST_DIR/wine/"
-echo "    $DIST_DIR/wine-${WINE_VERSION}-x86_64-macos.tar.gz"
