@@ -22,17 +22,21 @@ if [ "$CLEAN" -eq 1 ]; then
 fi
 mkdir -p "$BUILD_DIR"
 
-# Configure
-echo "==> Configuring Wine..."
+# Configure (skip if already configured unless --clean was passed)
 cd "$BUILD_DIR"
-arch -x86_64 "$WINE_SRC/configure" \
-    --enable-archs=i386,x86_64 \
-    CC="clang -arch x86_64" \
-    CROSSCC="clang -arch x86_64" \
-    --host=x86_64-apple-darwin \
-    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig" \
-    CFLAGS="-I/usr/local/include" \
-    LDFLAGS="-L/usr/local/lib"
+if [ "$CLEAN" -eq 1 ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
+    echo "==> Configuring Wine..."
+    arch -x86_64 "$WINE_SRC/configure" \
+        --enable-archs=i386,x86_64 \
+        CC="clang -arch x86_64" \
+        CROSSCC="clang -arch x86_64" \
+        --host=x86_64-apple-darwin \
+        PKG_CONFIG_PATH="/usr/local/lib/pkgconfig" \
+        CFLAGS="-I/usr/local/include" \
+        LDFLAGS="-L/usr/local/lib"
+else
+    echo "==> Skipping configure (already configured, use --clean to reconfigure)"
+fi
 
 # Build
 echo "==> Building Wine..."
