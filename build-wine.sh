@@ -9,11 +9,18 @@ if [ ! -f "$WINE_SRC/configure" ]; then
     exit 1
 fi
 
-# Clean build directory (preserve .git if any, and this script's parent)
-echo "==> Cleaning build directory..."
+# Parse flags
+CLEAN=0
+if [ "$1" = "--clean" ]; then
+    CLEAN=1
+fi
+
+# Clean if requested
+if [ "$CLEAN" -eq 1 ]; then
+    echo "==> Cleaning build directory..."
+    rm -rf "$BUILD_DIR"
+fi
 mkdir -p "$BUILD_DIR"
-cd "$BUILD_DIR"
-find . -maxdepth 1 ! -name '.' ! -name '..' -exec rm -rf {} +
 
 # Configure
 echo "==> Configuring Wine..."
