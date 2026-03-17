@@ -124,7 +124,11 @@ mkdir -p "$WINE_DIR/libexec"
 arch -x86_64 clang -arch x86_64 -O2 -o "$WINE_DIR/libexec/wine-launcher" "$LAUNCHER_SRC"
 
 echo "  Moving real binaries to libexec/..."
-mv "$WINE_DIR/bin/wine" "$WINE_DIR/libexec/wine"
+# Symlink to the real wine loader (lib/wine/x86_64-unix/wine) instead of bin/wine.
+# bin/wine is a small launcher that re-execs the real loader, adding an extra exec
+# that breaks ptrace-based injection (runtime_loader).  The real loader has
+# wine_main_preload_info so it does NOT re-exec itself.
+ln -s ../lib/wine/x86_64-unix/wine "$WINE_DIR/libexec/wine"
 mv "$WINE_DIR/bin/wineserver" "$WINE_DIR/libexec/wineserver"
 for tool in winegcc wineg++ winebuild widl winedump wmc wrc; do
     if [ -f "$WINE_DIR/bin/$tool" ]; then
