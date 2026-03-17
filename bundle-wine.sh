@@ -1,16 +1,35 @@
 #!/bin/bash
 set -e
 
-BUILD_DIR="/Users/alex/Developer/wine-build"
-DIST_DIR="/Users/alex/Developer/wine-dist"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="/Users/alex/Developer/wine/build"
 WINE_VERSION="11.4"
+DIST_DIR=""
+
+usage() {
+    echo "Usage: $0 --dest <dir>"
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dest) DIST_DIR="$2"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+if [ -z "$DIST_DIR" ]; then
+    echo "Error: --dest is required"
+    usage
+fi
 
 # ── Step 1: Staged install ──────────────────────────────────────────────
 echo "==> Step 1: Staged install with DESTDIR"
+find "$DIST_DIR" -name .DS_Store -delete 2>/dev/null || true
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 cd "$BUILD_DIR"
-arch -x86_64 make install-lib DESTDIR="$DIST_DIR"
+arch -x86_64 make install DESTDIR="$DIST_DIR"
 
 # ── Step 2: Flatten prefix ──────────────────────────────────────────────
 echo "==> Step 2: Flatten prefix"
@@ -94,48 +113,34 @@ for dylib in "$EXT_DIR"/*.dylib; do
     done
 done
 
-# ── Step 3b: Create wrapper scripts ─────────────────────────────────────
-# Wine installs bin/wine as a Mach-O binary and all other programs as symlinks
-# to it. We move the real binaries to libexec/ and create shell wrappers that
-# set DYLD_FALLBACK_LIBRARY_PATH so dlopen() finds our bundled libs.
-echo "  Creating wrapper scripts..."
+# ── Step 3b: Compile launcher and replace wrappers ─────────────────────
+# Instead of shell script wrappers, compile a small x86_64 C launcher that
+# sets DYLD_FALLBACK_LIBRARY_PATH + WINELOADER and execs the real binary.
+# It reads argv[0] basename to dispatch: wine→libexec/wine, wineserver→
+# libexec/wineserver, anything else→libexec/wine <basename>.
+LAUNCHER_SRC="$SCRIPT_DIR/wine-launcher.c"
+echo "  Compiling launcher from $LAUNCHER_SRC..."
 mkdir -p "$WINE_DIR/libexec"
+arch -x86_64 clang -arch x86_64 -O2 -o "$WINE_DIR/libexec/wine-launcher" "$LAUNCHER_SRC"
+
+echo "  Moving real binaries to libexec/..."
 mv "$WINE_DIR/bin/wine" "$WINE_DIR/libexec/wine"
 mv "$WINE_DIR/bin/wineserver" "$WINE_DIR/libexec/wineserver"
+for tool in winegcc wineg++ winebuild widl winedump wmc wrc; do
+    if [ -f "$WINE_DIR/bin/$tool" ]; then
+        mv "$WINE_DIR/bin/$tool" "$WINE_DIR/libexec/$tool"
+    fi
+done
 rm -f "$WINE_DIR/bin/"*
 
-# wine wrapper
-cat > "$WINE_DIR/bin/wine" << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WINE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-export DYLD_FALLBACK_LIBRARY_PATH="$WINE_ROOT/lib/external${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
-export WINELOADER="$WINE_ROOT/libexec/wine"
-exec "$WINE_ROOT/libexec/wine" "$@"
-EOF
-chmod +x "$WINE_DIR/bin/wine"
-
-# wineserver wrapper
-cat > "$WINE_DIR/bin/wineserver" << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WINE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-export DYLD_FALLBACK_LIBRARY_PATH="$WINE_ROOT/lib/external${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
-exec "$WINE_ROOT/libexec/wineserver" "$@"
-EOF
-chmod +x "$WINE_DIR/bin/wineserver"
-
-# Program wrappers (winecfg, regedit, etc. — Wine uses argv[0] to determine the program)
-for prog in msidb msiexec notepad regedit regsvr32 wineboot winecfg wineconsole winedbg winefile winemine winepath; do
-    cat > "$WINE_DIR/bin/$prog" << INNEREOF
-#!/bin/bash
-SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-WINE_ROOT="\$(cd "\$SCRIPT_DIR/.." && pwd)"
-export DYLD_FALLBACK_LIBRARY_PATH="\$WINE_ROOT/lib/external\${DYLD_FALLBACK_LIBRARY_PATH:+:\$DYLD_FALLBACK_LIBRARY_PATH}"
-export WINELOADER="\$WINE_ROOT/libexec/wine"
-exec "\$WINE_ROOT/libexec/wine" $prog "\$@"
-INNEREOF
-    chmod +x "$WINE_DIR/bin/$prog"
+echo "  Creating launcher symlinks in bin/..."
+for prog in wine wineserver msidb msiexec notepad regedit regsvr32 wineboot winecfg wineconsole winedbg winefile winemine winepath; do
+    ln -s ../libexec/wine-launcher "$WINE_DIR/bin/$prog"
+done
+for tool in winegcc wineg++ winebuild widl winedump wmc wrc; do
+    if [ -f "$WINE_DIR/libexec/$tool" ]; then
+        ln -s ../libexec/wine-launcher "$WINE_DIR/bin/$tool"
+    fi
 done
 
 # ── Step 4: Verify ──────────────────────────────────────────────────────

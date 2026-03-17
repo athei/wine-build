@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-WINE_SRC="/Users/alex/Developer/wine"
-BUILD_DIR="/Users/alex/Developer/wine-build"
+WINE_SRC="/Users/alex/Developer/wine/src"
+BUILD_DIR="/Users/alex/Developer/wine/build"
 
 if [ ! -f "$WINE_SRC/configure" ]; then
     echo "Error: Wine source not found at $WINE_SRC"
@@ -11,6 +11,7 @@ fi
 
 # Clean build directory (preserve .git if any, and this script's parent)
 echo "==> Cleaning build directory..."
+mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 find . -maxdepth 1 ! -name '.' ! -name '..' -exec rm -rf {} +
 
