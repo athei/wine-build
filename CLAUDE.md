@@ -18,21 +18,17 @@ Two scripts run sequentially — build first, then bundle:
 ./bundle-wine.sh --dest /path/to/output
 ```
 
-**build-wine.sh** — Configures and compiles Wine from `../src` into `../build`. Uses Homebrew x86_64 deps from `/usr/local/`. Incremental by default (preserves `../build` between runs). Pass `--clean` to wipe the build directory first for a full rebuild.
+**build-wine.sh** — Configures and compiles Wine from `../src` into `../build`. Uses Homebrew x86_64 deps from `/usr/local/`. Incremental by default (preserves `../build` between runs). Pass `--clean` to wipe the build directory first for a full rebuild. On `--clean`, also patches sonames in `config.h` to use `@loader_path/../../external/` paths for relocatable bundles.
 
-**bundle-wine.sh** — Takes the build output and creates a distributable `wine/` tree. Requires `--dest <dir>`. Steps: staged install → flatten prefix → bundle dylibs (copy, fix install names with `@loader_path`) → compile launcher → verify.
+**bundle-wine.sh** — Takes the build output and creates a distributable `wine/` tree. Requires `--dest <dir>`. Steps: staged install → flatten prefix → bundle dylibs (copy, fix install names with `@loader_path`) → verify.
 
-## Launcher Architecture
+## Relocation Strategy
 
-`wine-launcher.c` is a compiled x86_64 C binary that replaces what were previously per-program shell wrapper scripts. It lives at `libexec/wine-launcher` in the distribution.
+Soname patching eliminates the need for `DYLD_FALLBACK_LIBRARY_PATH` and any launcher binary. The `bin/` layout is left exactly as `make install` creates it.
 
-- Every program in `bin/` (wine, wineserver, winecfg, regedit, etc.) is a symlink to `../libexec/wine-launcher`
-- The launcher reads `argv[0]` basename to decide what to exec:
-  - `wine`/`wine64` → `libexec/wine`
-  - `wineserver` → `libexec/wineserver`
-  - Dev tools (winegcc, widl, etc.) → `libexec/<tool>`
-  - Everything else (winecfg, regedit, etc.) → `libexec/wine <basename>`
-- Sets `DYLD_FALLBACK_LIBRARY_PATH` to `lib/external/` and `WINELOADER` before exec
+- **Soname patching**: `build-wine.sh --clean` patches `SONAME_LIB*` defines in `config.h` to use `@loader_path/../../external/<lib>` paths before compiling. This makes Wine's .so modules in `lib/wine/x86_64-unix/` find bundled dylibs in `lib/external/` via dyld's `@loader_path` resolution.
+- **bin/ layout**: Unchanged from `make install` — `bin/wine` is Wine's standard preloader, convenience programs (winecfg, regedit, etc.) are symlinks to it.
+- No `libexec/` directory. No `DYLD_FALLBACK_LIBRARY_PATH` needed.
 
 ## Key Details
 

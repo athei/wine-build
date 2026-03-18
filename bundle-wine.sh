@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="/Users/alex/Developer/wine/build"
 WINE_VERSION="11.4"
 DIST_DIR=""
@@ -40,8 +39,8 @@ WINE_DIR="$DIST_DIR/wine"
 EXT_DIR="$WINE_DIR/lib/external"
 
 # ── Step 3: Bundle dynamic libraries ────────────────────────────────────
-# Wine uses dlopen() to load these at runtime (see SONAME_LIB* in config.h).
-# We bundle them and set DYLD_FALLBACK_LIBRARY_PATH via wrapper scripts.
+# Wine's .so modules dlopen these via @loader_path sonames (patched in Step 0).
+# Transitive deps are loaded by dyld from their @loader_path install names.
 echo "==> Step 3: Bundle dynamic libraries"
 mkdir -p "$EXT_DIR"
 
@@ -113,44 +112,10 @@ for dylib in "$EXT_DIR"/*.dylib; do
     done
 done
 
-# ── Step 3b: Compile launcher and replace wrappers ─────────────────────
-# Instead of shell script wrappers, compile a small x86_64 C launcher that
-# sets DYLD_FALLBACK_LIBRARY_PATH + WINELOADER and execs the real binary.
-# It reads argv[0] basename to dispatch: wine→libexec/wine, wineserver→
-# libexec/wineserver, anything else→libexec/wine <basename>.
-LAUNCHER_SRC="$SCRIPT_DIR/wine-launcher.c"
-echo "  Compiling launcher from $LAUNCHER_SRC..."
-mkdir -p "$WINE_DIR/libexec"
-arch -x86_64 clang -arch x86_64 -O2 -o "$WINE_DIR/libexec/wine-launcher" "$LAUNCHER_SRC"
-
-echo "  Moving real binaries to libexec/..."
-# Symlink to the real wine loader (lib/wine/x86_64-unix/wine) instead of bin/wine.
-# bin/wine is a small launcher that re-execs the real loader, adding an extra exec
-# that breaks ptrace-based injection (runtime_loader).  The real loader has
-# wine_main_preload_info so it does NOT re-exec itself.
-ln -s ../lib/wine/x86_64-unix/wine "$WINE_DIR/libexec/wine"
-mv "$WINE_DIR/bin/wineserver" "$WINE_DIR/libexec/wineserver"
-for tool in winegcc wineg++ winebuild widl winedump wmc wrc; do
-    if [ -f "$WINE_DIR/bin/$tool" ]; then
-        mv "$WINE_DIR/bin/$tool" "$WINE_DIR/libexec/$tool"
-    fi
-done
-rm -f "$WINE_DIR/bin/"*
-
-echo "  Creating launcher symlinks in bin/..."
-for prog in wine wineserver msidb msiexec notepad regedit regsvr32 wineboot winecfg wineconsole winedbg winefile winemine winepath; do
-    ln -s ../libexec/wine-launcher "$WINE_DIR/bin/$prog"
-done
-for tool in winegcc wineg++ winebuild widl winedump wmc wrc; do
-    if [ -f "$WINE_DIR/libexec/$tool" ]; then
-        ln -s ../libexec/wine-launcher "$WINE_DIR/bin/$tool"
-    fi
-done
-
 # ── Step 4: Verify ──────────────────────────────────────────────────────
 echo "==> Step 4: Verify"
 
-echo "  wine binary: $(file "$WINE_DIR/libexec/wine" | sed 's|.*/||')"
+echo "  wine binary: $(file "$WINE_DIR/bin/wine" | sed 's|.*/||')"
 
 # Check bundled dylibs have no /usr/local refs
 LEAKED=0
