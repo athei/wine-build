@@ -45,6 +45,7 @@ if [ "$CLEAN" -eq 1 ]; then
         -e 's|"libfreetype\.6\.dylib"|"@loader_path/../../external/libfreetype.6.dylib"|' \
         -e 's|"libgnutls\.30\.dylib"|"@loader_path/../../external/libgnutls.30.dylib"|' \
         -e 's|"libSDL2-2\.0\.0\.dylib"|"@loader_path/../../external/libSDL2-2.0.0.dylib"|' \
+        -e 's|"libMoltenVK\.dylib"|"@loader_path/../../external/libMoltenVK.dylib"|' \
         "$BUILD_DIR/include/config.h"
 fi
 

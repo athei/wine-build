@@ -49,6 +49,7 @@ LIBS=(
     /usr/local/lib/libfreetype.6.dylib
     /usr/local/lib/libgnutls.30.dylib
     /usr/local/lib/libSDL2-2.0.0.dylib
+    /usr/local/lib/libMoltenVK.dylib
 )
 
 # Transitive deps (found via otool -L on the above)
