@@ -2,17 +2,18 @@
 set -e
 
 BUILD_DIR="/Users/alex/Developer/wine/build"
-WINE_VERSION="11.4"
 DIST_DIR=""
+RUNTIME_ONLY=0
 
 usage() {
-    echo "Usage: $0 --dest <dir>"
+    echo "Usage: $0 --dest <dir> [--runtime-only]"
     exit 1
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dest) DIST_DIR="$2"; shift 2 ;;
+        --runtime-only) RUNTIME_ONLY=1; shift ;;
         *) usage ;;
     esac
 done
@@ -23,12 +24,17 @@ if [ -z "$DIST_DIR" ]; then
 fi
 
 # ── Step 1: Staged install ──────────────────────────────────────────────
-echo "==> Step 1: Staged install with DESTDIR"
 find "$DIST_DIR" -name .DS_Store -delete 2>/dev/null || true
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 cd "$BUILD_DIR"
-arch -x86_64 make install DESTDIR="$DIST_DIR"
+if [ "$RUNTIME_ONLY" -eq 1 ]; then
+    echo "==> Step 1: Staged install (runtime only)"
+    arch -x86_64 make install-lib DESTDIR="$DIST_DIR"
+else
+    echo "==> Step 1: Staged install with DESTDIR"
+    arch -x86_64 make install DESTDIR="$DIST_DIR"
+fi
 
 # ── Step 2: Flatten prefix ──────────────────────────────────────────────
 echo "==> Step 2: Flatten prefix"
@@ -140,3 +146,6 @@ echo "  Testing: $("$WINE_DIR/bin/wine" --version 2>/dev/null || echo 'FAILED')"
 echo ""
 echo "==> Done! Distribution is at:"
 echo "    $DIST_DIR/wine/"
+if [ "$RUNTIME_ONLY" -eq 1 ]; then
+    echo "    (runtime only — no development files)"
+fi
