@@ -23,10 +23,19 @@ if [ -z "$DIST_DIR" ]; then
     usage
 fi
 
-# ── Step 1: Staged install ──────────────────────────────────────────────
-find "$DIST_DIR" -name .DS_Store -delete 2>/dev/null || true
-rm -rf "$DIST_DIR"
+# ── Step 0: Clean previous bundle ──────────────────────────────────────
+WINE_DIR="$DIST_DIR/wine"
+if [ -d "$WINE_DIR" ]; then
+    echo "Will delete existing bundle: $WINE_DIR"
+    read -r -p "Continue? [y/N] " confirm
+    case "$confirm" in
+        [yY]) rm -rf "$WINE_DIR" ;;
+        *) echo "Aborted."; exit 1 ;;
+    esac
+fi
 mkdir -p "$DIST_DIR"
+
+# ── Step 1: Staged install ──────────────────────────────────────────────
 cd "$BUILD_DIR"
 if [ "$RUNTIME_ONLY" -eq 1 ]; then
     echo "==> Step 1: Staged install (runtime only)"
@@ -41,7 +50,6 @@ echo "==> Step 2: Flatten prefix"
 mv "$DIST_DIR/usr/local" "$DIST_DIR/wine"
 rm -rf "$DIST_DIR/usr"
 
-WINE_DIR="$DIST_DIR/wine"
 EXT_DIR="$WINE_DIR/lib/external"
 
 # ── Step 3: Bundle dynamic libraries ────────────────────────────────────
