@@ -2,8 +2,14 @@
 set -e
 
 BUILD_DIR="/Users/alex/Developer/wine/build"
+MINGW_DIR="/opt/llvm-mingw"
 DIST_DIR=""
 RUNTIME_ONLY=0
+
+# `make install` may rebuild any stale targets, including PE modules that need mingw.
+if [ -d "$MINGW_DIR/bin" ]; then
+    export PATH="$PATH:$MINGW_DIR/bin"
+fi
 
 usage() {
     echo "Usage: $0 --dest <dir> [--runtime-only]"

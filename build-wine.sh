@@ -3,11 +3,18 @@ set -e
 
 WINE_SRC="/Users/alex/Developer/wine/src"
 BUILD_DIR="/Users/alex/Developer/wine/build"
+MINGW_DIR="/opt/llvm-mingw"
 
 if [ ! -f "$WINE_SRC/configure" ]; then
     echo "Error: Wine source not found at $WINE_SRC"
     exit 1
 fi
+
+if [ ! -x "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" ]; then
+    echo "Error: llvm-mingw not found at $MINGW_DIR"
+    exit 1
+fi
+export PATH="$PATH:$MINGW_DIR/bin"
 
 # Parse flags
 CLEAN=0
