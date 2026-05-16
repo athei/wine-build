@@ -35,6 +35,38 @@ if [ "$CLEAN" -eq 1 ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
     echo "==> Configuring Wine..."
     arch -x86_64 "$WINE_SRC/configure" \
         --enable-archs=i386,x86_64 \
+        --disable-tests \
+        --with-coreaudio \
+        --with-gnutls \
+        --with-mingw \
+        --with-opencl \
+        --with-sdl \
+        --with-unwind \
+        --without-alsa \
+        --without-capi \
+        --without-cups \
+        --without-dbus \
+        --without-ffmpeg \
+        --without-fontconfig \
+        --without-gettext \
+        --without-gphoto \
+        --without-gssapi \
+        --without-gstreamer \
+        --without-hwloc \
+        --without-inotify \
+        --without-krb5 \
+        --without-netapi \
+        --without-oss \
+        --without-pcap \
+        --without-pcsclite \
+        --without-pulse \
+        --without-sane \
+        --without-udev \
+        --without-usb \
+        --without-v4l2 \
+        --without-vulkan \
+        --without-wayland \
+        --without-x \
         CC="clang -arch x86_64" \
         CROSSCC="clang -arch x86_64" \
         --host=x86_64-apple-darwin \
@@ -52,7 +84,6 @@ if [ "$CLEAN" -eq 1 ]; then
         -e 's|"libfreetype\.6\.dylib"|"@loader_path/../../external/libfreetype.6.dylib"|' \
         -e 's|"libgnutls\.30\.dylib"|"@loader_path/../../external/libgnutls.30.dylib"|' \
         -e 's|"libSDL2-2\.0\.0\.dylib"|"@loader_path/../../external/libSDL2-2.0.0.dylib"|' \
-        -e 's|"libMoltenVK\.dylib"|"@loader_path/../../external/libMoltenVK.dylib"|' \
         "$BUILD_DIR/include/config.h"
 fi
 
