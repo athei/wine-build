@@ -35,7 +35,6 @@ if [ "$CLEAN" -eq 1 ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
     echo "==> Configuring Wine..."
     arch -x86_64 "$WINE_SRC/configure" \
         --enable-archs=i386,x86_64 \
-        --disable-tests \
         --with-coreaudio \
         --with-gnutls \
         --with-mingw \
