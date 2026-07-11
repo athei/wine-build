@@ -64,56 +64,67 @@ EXT_DIR="$WINE_DIR/lib/external"
 echo "==> Step 3: Bundle dynamic libraries"
 mkdir -p "$EXT_DIR"
 
-# Direct deps (Wine dlopen's these by soname)
-LIBS=(
-    /usr/local/lib/libfreetype.6.dylib
-    /usr/local/lib/libgnutls.30.dylib
-    /usr/local/lib/libSDL2-2.0.0.dylib
-)
+# Direct deps: Wine dlopen's these by soname. build-wine.sh patches their
+# sonames in config.h to @loader_path/../../external/<name>, so config.h is
+# the authoritative (version-correct) list — resolve each against /usr/local/lib.
+CONFIG_H="$BUILD_DIR/include/config.h"
+if [ ! -f "$CONFIG_H" ]; then
+    echo "Error: $CONFIG_H not found (run build-wine.sh first)"
+    exit 1
+fi
+LIBS=()
+for name in $(sed -n 's|.*"@loader_path/\.\./\.\./external/\([^"]*\)".*|\1|p' "$CONFIG_H"); do
+    LIBS+=("/usr/local/lib/$name")
+done
+# Homebrew's "libSDL2" is sdl2-compat, a shim that loads real SDL3 at runtime
+# via @loader_path/libSDL3.dylib — so SDL3 must sit beside it in the bundle.
+LIBS+=(/usr/local/lib/libSDL3.dylib)
 
-# Transitive deps (found via otool -L on the above)
-LIBS+=(
-    /usr/local/opt/libpng/lib/libpng16.16.dylib
-    /usr/local/opt/gettext/lib/libintl.8.dylib
-    /usr/local/opt/p11-kit/lib/libp11-kit.0.dylib
-    /usr/local/opt/libidn2/lib/libidn2.0.dylib
-    /usr/local/opt/libunistring/lib/libunistring.5.dylib
-    /usr/local/opt/libtasn1/lib/libtasn1.6.dylib
-    /usr/local/opt/nettle/lib/libhogweed.6.dylib
-    /usr/local/opt/nettle/lib/libnettle.8.dylib
-    /usr/local/opt/gmp/lib/libgmp.10.dylib
-)
-
-echo "  Copying dylibs..."
+echo "  Copying direct deps..."
+MISSED=0
 for lib in "${LIBS[@]}"; do
+    name=$(basename "$lib")
     if [ -f "$lib" ]; then
-        name=$(basename "$lib")
         echo "    $name"
         cp -L "$lib" "$EXT_DIR/$name"
     else
-        echo "    WARNING: $lib not found, skipping"
+        echo "    MISSING: $name from $lib"
+        MISSED=1
     fi
 done
-chmod +w "$EXT_DIR"/*.dylib
 
-# Check for missed transitive deps
-echo "  Checking for missed transitive deps..."
-MISSED=0
-for dylib in "$EXT_DIR"/*.dylib; do
-    for dep in $(otool -L "$dylib" | tail -n +2 | awk '{print $1}'); do
-        case "$dep" in
-            /usr/lib/*|/System/*|@*) ;;
-            /usr/local/*)
-                depname=$(basename "$dep")
-                if [ ! -f "$EXT_DIR/$depname" ]; then
-                    echo "    MISSING: $depname (needed by $(basename "$dylib")) from $dep"
-                    MISSED=1
-                fi
-                ;;
-        esac
+# Transitive deps: walk the otool -L closure, copying every /usr/local
+# dependency until no new ones appear. Line 2 of otool -L is the dylib's
+# own install name, not a dependency — skip it.
+echo "  Copying transitive deps..."
+while :; do
+    added=0
+    for dylib in "$EXT_DIR"/*.dylib; do
+        for dep in $(otool -L "$dylib" | tail -n +3 | awk '{print $1}'); do
+            case "$dep" in
+                /usr/local/*)
+                    depname=$(basename "$dep")
+                    if [ -f "$EXT_DIR/$depname" ]; then
+                        :
+                    elif [ -f "$dep" ]; then
+                        echo "    $depname (needed by $(basename "$dylib"))"
+                        cp -L "$dep" "$EXT_DIR/$depname"
+                        added=1
+                    else
+                        echo "    MISSING: $depname (needed by $(basename "$dylib")) from $dep"
+                        MISSED=1
+                    fi
+                    ;;
+            esac
+        done
     done
+    [ $added -eq 0 ] && break
 done
-[ $MISSED -eq 0 ] && echo "    None missed."
+if [ $MISSED -ne 0 ]; then
+    echo "Error: required libraries are missing — bundle would not be self-contained"
+    exit 1
+fi
+chmod +w "$EXT_DIR"/*.dylib
 
 # Fix install names so bundled dylibs reference each other via @loader_path
 echo "  Fixing install names..."
@@ -141,20 +152,28 @@ echo "  wine binary: $(file "$WINE_DIR/bin/wine" | sed 's|.*/||')"
 LEAKED=0
 for dylib in "$EXT_DIR"/*.dylib; do
     if otool -L "$dylib" | grep -q "/usr/local/"; then
-        echo "  WARNING: $(basename "$dylib") still references /usr/local/"
+        echo "  ERROR: $(basename "$dylib") still references /usr/local/"
         LEAKED=1
     fi
 done
 # Check .so modules
 for so in "$WINE_DIR"/lib/wine/x86_64-unix/*.so; do
     if otool -L "$so" 2>/dev/null | grep -q "/usr/local/"; then
-        echo "  WARNING: $(basename "$so") still references /usr/local/"
+        echo "  ERROR: $(basename "$so") still references /usr/local/"
         LEAKED=1
     fi
 done
-[ $LEAKED -eq 0 ] && echo "  All binaries clean — no /usr/local references."
+if [ $LEAKED -ne 0 ]; then
+    echo "Error: bundle is not self-contained"
+    exit 1
+fi
+echo "  All binaries clean — no /usr/local references."
 
-echo "  Testing: $("$WINE_DIR/bin/wine" --version 2>/dev/null || echo 'FAILED')"
+WINE_VERSION=$("$WINE_DIR/bin/wine" --version) || {
+    echo "Error: bundled wine failed to run"
+    exit 1
+}
+echo "  Testing: $WINE_VERSION"
 
 echo ""
 echo "==> Done! Distribution is at:"
