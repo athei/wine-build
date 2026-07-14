@@ -86,10 +86,14 @@ Rosetta + x86_64 Homebrew).
 [`wine-src.ref`](wine-src.ref) pins the branch, tag, or commit of
 [athei/wine](https://github.com/athei/wine) that gets built.
 
+Release tags follow the CrossOver version of the sources plus a build
+revision: `cx-<crossover-version>-<revision>`, e.g. `cx-26.2.0-0` is the
+first build based on CrossOver 26.2.0.
+
 To cut a release:
 
 1. Push the desired source state to a branch/tag on `athei/wine`.
 2. Update `wine-src.ref` here to that ref and push to `main`.
-3. Tag the commit: `git tag v<version> && git push origin v<version>`.
+3. Tag the commit: `git tag cx-26.2.0-0 && git push origin cx-26.2.0-0`.
 4. CI builds the distribution and creates a **draft release** with
-   `wine-v<version>-macos-x86_64.tar.xz` attached. Review and publish.
+   `wine-cx-26.2.0-0-macos-x86_64.tar.xz` attached. Review and publish.
