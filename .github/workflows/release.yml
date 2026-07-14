@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  LLVM_MINGW_VERSION: "20260616"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v5
+        with:
+          path: scripts
+
+      - name: Read Wine source ref
+        id: ref
+        run: echo "ref=$(tr -d '[:space:]' < scripts/wine-src.ref)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Wine source
+        uses: actions/checkout@v5
+        with:
+          repository: athei/wine
+          ref: ${{ steps.ref.outputs.ref }}
+          path: src
+          fetch-depth: 1
+
+      - name: Ensure Rosetta 2
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+
+      - name: Install x86_64 Homebrew
+        run: |
+          if [ ! -x /usr/local/bin/brew ]; then
+            NONINTERACTIVE=1 arch -x86_64 /bin/bash -c \
+              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          fi
+
+      - name: Install build dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          arch -x86_64 /usr/local/bin/brew install bison pkgconf freetype gnutls sdl2-compat sdl3
+          echo "/usr/local/opt/bison/bin" >> "$GITHUB_PATH"
+
+      - name: Install llvm-mingw
+        run: |
+          curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-macos-universal.tar.xz"
+          tar -xJf /tmp/llvm-mingw.tar.xz -C "$HOME"
+          mv "$HOME/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-macos-universal" "$HOME/llvm-mingw"
+
+      - name: Build Wine
+        run: MINGW_DIR="$HOME/llvm-mingw" scripts/build-wine.sh --clean
+
+      - name: Bundle distribution
+        run: MINGW_DIR="$HOME/llvm-mingw" scripts/bundle-wine.sh --dest "$GITHUB_WORKSPACE/dist"
+
+      - name: Create tarball
+        run: |
+          XZ_OPT="-T0" gtar -C dist -cJf "wine-${GITHUB_REF_NAME}-macos-x86_64.tar.xz" wine
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Wine distribution built from athei/wine@${{ steps.ref.outputs.ref }}" \
+            "wine-${GITHUB_REF_NAME}-macos-x86_64.tar.xz"

@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-BUILD_DIR="/Users/alex/Developer/wine/build"
-MINGW_DIR="/opt/llvm-mingw"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
+MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 DIST_DIR=""
 RUNTIME_ONLY=0
 

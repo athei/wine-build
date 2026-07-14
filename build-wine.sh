@@ -1,9 +1,10 @@
 #!/bin/bash
 set -e
 
-WINE_SRC="/Users/alex/Developer/wine/src"
-BUILD_DIR="/Users/alex/Developer/wine/build"
-MINGW_DIR="/opt/llvm-mingw"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WINE_SRC="${WINE_SRC:-$ROOT/src}"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
+MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 
 if [ ! -f "$WINE_SRC/configure" ]; then
     echo "Error: Wine source not found at $WINE_SRC"
