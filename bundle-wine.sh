@@ -77,6 +77,11 @@ LIBS=()
 for name in $(sed -n 's|.*"@loader_path/\.\./\.\./external/\([^"]*\)".*|\1|p' "$CONFIG_H"); do
     LIBS+=("/usr/local/lib/$name")
 done
+if [ ${#LIBS[@]} -eq 0 ]; then
+    echo "Error: no @loader_path sonames in $CONFIG_H — the build is not"
+    echo "relocatable (config.h lost its soname patches). Re-run build-wine.sh."
+    exit 1
+fi
 # Homebrew's "libSDL2" is sdl2-compat, a shim that loads real SDL3 at runtime
 # via @loader_path/libSDL3.dylib — so SDL3 must sit beside it in the bundle.
 LIBS+=(/usr/local/lib/libSDL3.dylib)

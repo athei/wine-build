@@ -20,9 +20,11 @@ Two scripts run sequentially — build first, then bundle:
 **build-wine.sh** — Configures and compiles Wine into the build directory.
 Uses Homebrew x86_64 deps from `/usr/local/`. Incremental by default
 (preserves the build directory between runs). Pass `--clean` to wipe the
-build directory first for a full rebuild. On `--clean`, also patches sonames
-in `config.h` to use `@loader_path/../../external/` paths for relocatable
-bundles.
+build directory first for a full rebuild. Before (and after) every build it
+ensures the sonames in `config.h` are patched to
+`@loader_path/../../external/` paths for relocatable bundles — re-applying
+the patch if `config.status` regenerated `config.h`, e.g. after a source
+update.
 
 **bundle-wine.sh** — Takes the build output and creates a distributable
 `wine/` tree. Requires `--dest <dir>`. Pass `--runtime-only` to skip the
@@ -46,7 +48,7 @@ Soname patching eliminates the need for `DYLD_FALLBACK_LIBRARY_PATH` and any
 launcher binary. The `bin/` layout is left exactly as `make install` creates
 it.
 
-- **Soname patching**: `build-wine.sh --clean` patches `SONAME_LIB*` defines
+- **Soname patching**: `build-wine.sh` patches `SONAME_LIB*` defines
   in `config.h` to use `@loader_path/../../external/<lib>` paths before
   compiling. This makes Wine's .so modules in `lib/wine/x86_64-unix/` find
   bundled dylibs in `lib/external/` via dyld's `@loader_path` resolution.

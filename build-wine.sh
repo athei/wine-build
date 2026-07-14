@@ -77,19 +77,34 @@ else
     echo "==> Skipping configure (already configured, use --clean to reconfigure)"
 fi
 
-# Patch sonames for relocatable bundle (only on clean builds, after configure generates config.h)
-if [ "$CLEAN" -eq 1 ]; then
+# Patch sonames for relocatable bundle. config.status regenerates config.h
+# whenever configure changes (e.g. after a source update), silently reverting
+# the patch — so check before every build, not just on --clean, and re-check
+# after make in case the build itself triggered a regeneration.
+sonames_unpatched() {
+    grep -qE '^#define SONAME_(LIBFREETYPE|LIBGNUTLS|LIBSDL2) "lib' "$BUILD_DIR/include/config.h"
+}
+patch_sonames() {
     echo "==> Patching sonames in config.h for @loader_path relocation..."
     sed -i '' \
         -e 's|"libfreetype\.6\.dylib"|"@loader_path/../../external/libfreetype.6.dylib"|' \
         -e 's|"libgnutls\.30\.dylib"|"@loader_path/../../external/libgnutls.30.dylib"|' \
         -e 's|"libSDL2-2\.0\.0\.dylib"|"@loader_path/../../external/libSDL2-2.0.0.dylib"|' \
         "$BUILD_DIR/include/config.h"
+}
+if sonames_unpatched; then
+    patch_sonames
 fi
 
 # Build
 echo "==> Building Wine..."
 arch -x86_64 make -j$(sysctl -n hw.ncpu)
+
+if sonames_unpatched; then
+    echo "==> config.h was regenerated during the build — re-patching and rebuilding..."
+    patch_sonames
+    arch -x86_64 make -j$(sysctl -n hw.ncpu)
+fi
 
 # Verify
 echo "==> Build complete."
