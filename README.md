@@ -62,8 +62,8 @@ it.
 - All compilation uses `arch -x86_64` — this is an x86_64-only build running
   under Rosetta on Apple Silicon.
 - Dependencies come from Homebrew x86_64 (`/usr/local/`), not ARM
-  (`/opt/homebrew/`): `freetype gnutls sdl2-compat sdl3` plus `bison` ≥ 3.0
-  and `pkgconf` as build tools.
+  (`/opt/homebrew/`): `freetype gnutls molten-vk sdl2-compat sdl3` plus
+  `bison` ≥ 3.0 and `pkgconf` as build tools.
 - PE modules are cross-compiled with
   [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (`MINGW_DIR`). Its
   `bin/` is **appended** to `PATH`, never prepended — it contains an
@@ -74,6 +74,12 @@ it.
   fails configure loudly instead of silently changing the feature set.
   Note: never pass `--with-opengl` on macOS — it triggers an EGL probe that
   always fails there; the Mac driver links `-framework OpenGL` on its own.
+- Vulkan comes from MoltenVK loaded directly: there is no Vulkan loader and no
+  ICD manifest in the bundle, so nothing has to be pointed at with
+  `VK_ICD_FILENAMES`. Configure finds no `libvulkan`, falls back to
+  `libMoltenVK.dylib` and defines `SONAME_LIBVULKAN` to it; `win32u` dlopens
+  that soname and `winemac.drv` creates surfaces via `VK_EXT_metal_surface`.
+  The dylib ships as `lib/external/libMoltenVK.dylib`.
 - Bundled dylibs go in `lib/external/` with install names rewritten to
   `@loader_path/`.
 - The bundle script verifies no `/usr/local/` references leak into the final

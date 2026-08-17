@@ -68,13 +68,15 @@ mkdir -p "$EXT_DIR"
 # Direct deps: Wine dlopen's these by soname. build-wine.sh patches their
 # sonames in config.h to @loader_path/../../external/<name>, so config.h is
 # the authoritative (version-correct) list — resolve each against /usr/local/lib.
+# Deduplicated: one library can back several defines (libMoltenVK.dylib is both
+# SONAME_LIBVULKAN and SONAME_LIBMOLTENVK).
 CONFIG_H="$BUILD_DIR/include/config.h"
 if [ ! -f "$CONFIG_H" ]; then
     echo "Error: $CONFIG_H not found (run build-wine.sh first)"
     exit 1
 fi
 LIBS=()
-for name in $(sed -n 's|.*"@loader_path/\.\./\.\./external/\([^"]*\)".*|\1|p' "$CONFIG_H"); do
+for name in $(sed -n 's|.*"@loader_path/\.\./\.\./external/\([^"]*\)".*|\1|p' "$CONFIG_H" | sort -u); do
     LIBS+=("/usr/local/lib/$name")
 done
 if [ ${#LIBS[@]} -eq 0 ]; then

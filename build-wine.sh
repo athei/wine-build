@@ -51,6 +51,7 @@ if [ "$CLEAN" -eq 1 ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
         --with-opencl \
         --with-sdl \
         --with-unwind \
+        --with-vulkan \
         --without-alsa \
         --without-capi \
         --without-cups \
@@ -73,7 +74,6 @@ if [ "$CLEAN" -eq 1 ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
         --without-udev \
         --without-usb \
         --without-v4l2 \
-        --without-vulkan \
         --without-wayland \
         --without-x \
         CC="clang -arch x86_64" \
@@ -91,13 +91,16 @@ fi
 # the patch — so check before every build, not just on --clean, and re-check
 # after make in case the build itself triggered a regeneration.
 sonames_unpatched() {
-    grep -qE '^#define SONAME_(LIBFREETYPE|LIBGNUTLS|LIBSDL2) "lib' "$BUILD_DIR/include/config.h"
+    grep -qE '^#define SONAME_(LIBFREETYPE|LIBGNUTLS|LIBMOLTENVK|LIBSDL2|LIBVULKAN) "lib' "$BUILD_DIR/include/config.h"
 }
 patch_sonames() {
     echo "==> Patching sonames in config.h for @loader_path relocation..."
+    # SONAME_LIBVULKAN and SONAME_LIBMOLTENVK both hold libMoltenVK.dylib (Vulkan
+    # comes from MoltenVK directly, no loader); one rule covers both lines.
     sed -i '' \
         -e 's|"libfreetype\.6\.dylib"|"@loader_path/../../external/libfreetype.6.dylib"|' \
         -e 's|"libgnutls\.30\.dylib"|"@loader_path/../../external/libgnutls.30.dylib"|' \
+        -e 's|"libMoltenVK\.dylib"|"@loader_path/../../external/libMoltenVK.dylib"|' \
         -e 's|"libSDL2-2\.0\.0\.dylib"|"@loader_path/../../external/libSDL2-2.0.0.dylib"|' \
         "$BUILD_DIR/include/config.h"
 }
