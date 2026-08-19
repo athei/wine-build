@@ -24,12 +24,23 @@ build directory first for a full rebuild. Before (and after) every build it
 ensures the sonames in `config.h` are patched to
 `@loader_path/../../external/` paths for relocatable bundles — re-applying
 the patch if `config.status` regenerated `config.h`, e.g. after a source
-update.
+update. It also builds the two `d3d9_test.exe` binaries that the bundle carries,
+naming that target explicitly rather than leaning on the toplevel `all`, which
+produces them only as a side effect of `programs/winetest`.
 
 **bundle-wine.sh** — Takes the build output and creates a distributable
 `wine/` tree. Requires `--dest <dir>`. Pass `--runtime-only` to skip the
-SDK/development files. Steps: staged install → flatten prefix → bundle
-dylibs (copy, fix install names with `@loader_path`) → verify.
+SDK/development files. Steps: staged install → flatten prefix → bundle d3d9
+test binaries → bundle dylibs (copy, fix install names with `@loader_path`) →
+verify.
+
+The d3d9 test binaries land in `lib/wine/tests/{i386,x86_64}-windows/`, outside
+the per-arch module directories the loader searches, and are not builtin-marked:
+`wine` executes them as ordinary PEs. Wine's `dlls/d3d9/tests` is the de-facto
+D3D9 conformance suite, so shipping it lets a consumer (mtld3d) gate its own
+`d3d9.dll` builtin against the suite with nothing but this bundle, which is what
+a CI job has. Skipped for `--runtime-only`, where the bundle goes into an
+application.
 
 ### Paths
 

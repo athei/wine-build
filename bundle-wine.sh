@@ -59,6 +59,30 @@ rm -rf "$DIST_DIR/usr"
 
 EXT_DIR="$WINE_DIR/lib/external"
 
+# ── Step 2b: Bundle the d3d9 test binaries ──────────────────────────────
+# Wine's `make install` skips test binaries, so copy the two `d3d9_test.exe`
+# in by hand. They are the de-facto D3D9 conformance suite, and shipping them
+# lets a consumer gate its own d3d9 builtin against the suite with nothing but
+# this bundle (no Wine build tree, which is what a CI job has). Plain PEs that
+# `wine` executes, so they are NOT builtin-marked, and they live outside the
+# per-arch module directories the loader searches by module name.
+#
+# Development files only: the runtime-only bundle goes into an application, and
+# a test suite has no business there.
+if [ "$RUNTIME_ONLY" -eq 0 ]; then
+    echo "==> Step 2b: Bundle the d3d9 test binaries"
+    for arch in i386-windows x86_64-windows; do
+        src="$BUILD_DIR/dlls/d3d9/tests/$arch/d3d9_test.exe"
+        if [ ! -f "$src" ]; then
+            echo "Error: $src not found (run build-wine.sh first)"
+            exit 1
+        fi
+        echo "    $arch/d3d9_test.exe"
+        mkdir -p "$WINE_DIR/lib/wine/tests/$arch"
+        cp "$src" "$WINE_DIR/lib/wine/tests/$arch/"
+    done
+fi
+
 # ── Step 3: Bundle dynamic libraries ────────────────────────────────────
 # Wine's .so modules dlopen these via @loader_path sonames (patched in Step 0).
 # Transitive deps are loaded by dyld from their @loader_path install names.

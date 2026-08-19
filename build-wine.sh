@@ -118,6 +118,16 @@ if sonames_unpatched; then
     arch -x86_64 make -j$(sysctl -n hw.ncpu)
 fi
 
+# The d3d9 test binaries, which bundle-wine.sh publishes so a consumer can run
+# Wine's de-facto D3D9 conformance suite against its own d3d9 builtin without a
+# Wine build tree of its own. The toplevel `all` happens to produce them today,
+# but only as a side effect of programs/winetest embedding every test binary as
+# a resource; naming the target keeps a bundle input a stated dependency instead
+# of a by-product, and costs nothing when they are already built.
+# `dlls/d3d9/tests/all` depends on exactly the two per-arch `d3d9_test.exe`.
+echo "==> Building the d3d9 test binaries..."
+arch -x86_64 make -j$(sysctl -n hw.ncpu) dlls/d3d9/tests/all
+
 # Verify
 echo "==> Build complete."
 file "$BUILD_DIR/loader/wine"
