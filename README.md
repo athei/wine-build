@@ -32,7 +32,7 @@ produces them only as a side effect of `programs/winetest`.
 `wine/` tree. Requires `--dest <dir>`. Pass `--runtime-only` to skip the
 SDK/development files. Steps: staged install → flatten prefix → bundle d3d9
 test binaries → bundle dylibs (copy, fix install names with `@loader_path`) →
-install the Direct3D backends from `redist/` → verify.
+download (cached) and install the Direct3D backends → verify.
 
 The d3d9 test binaries land in `lib/wine/tests/{i386,x86_64}-windows/`, outside
 the per-arch module directories the loader searches, and are not builtin-marked:
@@ -52,7 +52,7 @@ overridden via environment variables:
 | `WINE_SRC`   | `../src`           | build                  |
 | `BUILD_DIR`  | `../build`         | build, bundle          |
 | `MINGW_DIR`  | `/opt/llvm-mingw`  | build, bundle          |
-| `REDIST_DIR` | `./redist`         | bundle                 |
+| `CACHE_DIR`  | `../cache`         | bundle                 |
 
 ## Relocation strategy
 
@@ -86,9 +86,9 @@ it.
   fails configure loudly instead of silently changing the feature set.
   Note: never pass `--with-opengl` on macOS — it triggers an EGL probe that
   always fails there; the Mac driver links `-framework OpenGL` on its own.
-- Configured `--without-vulkan`. Nothing in the bundle needs it: D3D10-12 goes
-  through D3DMetal and DXMT (see Direct3D below), and wined3d falls back to its
-  GL backend for D3D9 and older.
+- Configured `--without-vulkan`. Nothing in the bundle needs it: D3D9-12 go
+  through D3DMetal, DXMT and mtld3d (see Direct3D below), and wined3d falls
+  back to its GL backend for D3D8 and older.
 - Bundled dylibs go in `lib/external/` with install names rewritten to
   `@loader_path/`.
 - The bundle script verifies no `/usr/local/` references leak into the final
@@ -117,7 +117,7 @@ To cut a release:
 
 ## Direct3D
 
-D3D10, D3D11 and D3D12 do not go through wined3d. Two third-party
+D3D9, D3D10, D3D11 and D3D12 do not go through wined3d. Three third-party
 implementations that target Metal directly are installed over Wine's own
 builtins by `bundle-wine.sh`:
 
@@ -125,12 +125,14 @@ builtins by `bundle-wine.sh`:
   `d3d12` and `dxgi` for x86_64.
 - **DXMT** covers `d3d10core`, `d3d11` and `dxgi` for i386, which Apple does
   not ship.
+- **[mtld3d](https://github.com/athei/mtld3d)** covers `d3d9` for both
+  architectures.
 
-wined3d stays, but only D3D9, D3D8 and DDraw still reach it (and D3D9 usually
-goes to mtld3d instead). With nothing left that needs a Vulkan backend, the
-build is configured `--without-vulkan` and the bundle step deletes the modules
-that could no longer work: `vulkan-1` and `winevulkan` on both architectures,
-plus `d3d12`/`d3d12core` for i386 and `d3d12core` for x86_64.
+wined3d stays, but only D3D8 and DDraw still reach it. With nothing left that
+needs a Vulkan backend, the build is configured `--without-vulkan` and the
+bundle step deletes the modules that could no longer work: `vulkan-1` and
+`winevulkan` on both architectures, plus `d3d12`/`d3d12core` for i386 and
+`d3d12core` for x86_64.
 
 | Path | Source |
 |------|--------|
@@ -139,32 +141,40 @@ plus `d3d12`/`d3d12core` for i386 and `d3d12core` for x86_64.
 | `lib/wine/x86_64-windows/{d3d10,d3d11,d3d12,dxgi,nvapi64,nvngx}.dll` | D3DMetal |
 | `lib/wine/i386-windows/{d3d10core,d3d11,dxgi,winemetal}.dll` | DXMT |
 | `lib/wine/x86_64-unix/winemetal.so` | DXMT |
+| `lib/wine/{i386,x86_64}-windows/{d3d9,mtld3d}.dll` | mtld3d |
+| `lib/wine/x86_64-unix/mtld3d.so` | mtld3d |
 
 `nvngx` is Apple's `nvngx-on-metalfx`, renamed on install because that is the
 name games load when they probe for DLSS; it maps onto MetalFX. There is no
-i386 unix half: DXMT's single x86_64 `winemetal.so` serves the 32-bit PE
-modules through its wow64 entry points.
+i386 unix half for either DXMT or mtld3d: a single x86_64 `.so` serves the
+32-bit PE modules through its wow64 entry points. mtld3d's `d3d9.dll` is the
+builtin-marked flavor that replaces Wine's own; its tarball's native-override
+variant, prefix markers and arm64 `.so` are not installed.
 
 ### Where the files come from
 
-`redist/` holds the upstream artifacts unmodified, committed so that a CI
-checkout is all a release build needs:
+[`redist.env`](redist.env) pins one URL and one SHA-256 per artifact.
+`bundle-wine.sh` downloads each into `CACHE_DIR` (`../cache` by default) and
+reuses the cached copy on later runs as long as its checksum still matches
+the pin; a mismatch is an error, never a silent re-download. Bumping a version
+means changing both the URL and the checksum. The release workflow caches the
+same directory keyed on the pin file's hash, so CI only downloads after a
+bump.
 
-```
-gptk.dmg     -> Evaluation_environment_for_Windows_games_4.0_beta_2.dmg
-dxmt.tar.gz  -> dxmt-v0.80-builtin.tar.gz
-```
-
-`bundle-wine.sh` reads the stable symlink names, so upgrading either one is a
-matter of dropping the new artifact in and repointing the link. The GPTK image
-is mounted read-only and its `redist/lib` located by search rather than by
-volume name.
+DXMT and mtld3d come straight from their GitHub releases. The GPTK image
+cannot: Apple's download needs an Apple ID session, so the unmodified dmg is
+attached to a `gptk-<version>` release on this repository and the pin points
+there. Upgrading it means downloading the new image by hand, creating a new
+`gptk-*` release with it (those tags do not trigger the release workflow), and
+repointing the pin. The image is mounted read-only and its `redist/lib`
+located by search rather than by volume name.
 
 Apple's license (`License.rtf`, shipped as `lib/external/D3DMetal-License.rtf`)
 allows distributing the Redistributables unmodified for non-commercial
-purposes. The files are therefore copied byte for byte: no `install_name_tool`,
-no re-signing, and the bundle's `/usr/local` closure walk never touches them,
-which is why the Direct3D step runs after the dylib step rather than inside it.
+purposes, which is what covers both the mirror and the bundle. The files are
+therefore copied byte for byte: no `install_name_tool`, no re-signing, and the
+bundle's `/usr/local` closure walk never touches them, which is why the
+Direct3D step runs after the dylib step rather than inside it.
 
 ### What the Wine side provides
 
@@ -205,7 +215,8 @@ glue both implementations bind to:
   prefix bootstrap a builtin only loads if a file exists at the Windows path
   (`is_builtin_path()` returns FALSE once `is_prefix_bootstrap` is clear), and
   the `11,,*` wildcard in `wine.inf` only creates fake DLLs for what is present
-  when wineboot runs. So `make install` mtld3d and wow-mods into the bundle
-  before first prefix creation; adding a builtin afterwards needs a
-  `wineboot -u`. A bundle redeploy wipes `lib/wine`, so both have to be
-  reinstalled after one.
+  when wineboot runs. The bundled mtld3d release is in place from the start;
+  anything added later (a development `make install` from the mtld3d tree,
+  which overrides the bundled copy, or wow-mods) needs a `wineboot -u` if it
+  brings a new builtin name. A bundle redeploy wipes `lib/wine`, so such
+  additions have to be reinstalled after one.

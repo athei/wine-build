@@ -62,6 +62,14 @@ jobs:
       - name: Build Wine
         run: MINGW_DIR="$HOME/llvm-mingw" scripts/build-wine.sh --clean
 
+      # The Direct3D redistributables bundle-wine.sh downloads. Keyed on the
+      # pin file, so a version bump is the only thing that invalidates it.
+      - name: Cache redistributables
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: redist-${{ hashFiles('scripts/redist.env') }}
+
       - name: Bundle distribution
         run: MINGW_DIR="$HOME/llvm-mingw" scripts/bundle-wine.sh --dest "$GITHUB_WORKSPACE/dist"
 
