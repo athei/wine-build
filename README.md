@@ -32,7 +32,7 @@ produces them only as a side effect of `programs/winetest`.
 `wine/` tree. Requires `--dest <dir>`. Pass `--runtime-only` to skip the
 SDK/development files. Steps: staged install → flatten prefix → bundle d3d9
 test binaries → bundle dylibs (copy, fix install names with `@loader_path`) →
-verify.
+install the Direct3D backends from `redist/` → verify.
 
 The d3d9 test binaries land in `lib/wine/tests/{i386,x86_64}-windows/`, outside
 the per-arch module directories the loader searches, and are not builtin-marked:
@@ -47,11 +47,12 @@ application.
 Both scripts default to a sibling layout relative to this repo and can be
 overridden via environment variables:
 
-| Variable    | Default            | Used by                |
-|-------------|--------------------|------------------------|
-| `WINE_SRC`  | `../src`           | build                  |
-| `BUILD_DIR` | `../build`         | build, bundle          |
-| `MINGW_DIR` | `/opt/llvm-mingw`  | build, bundle          |
+| Variable     | Default            | Used by                |
+|--------------|--------------------|------------------------|
+| `WINE_SRC`   | `../src`           | build                  |
+| `BUILD_DIR`  | `../build`         | build, bundle          |
+| `MINGW_DIR`  | `/opt/llvm-mingw`  | build, bundle          |
+| `REDIST_DIR` | `./redist`         | bundle                 |
 
 ## Relocation strategy
 
@@ -73,8 +74,8 @@ it.
 - All compilation uses `arch -x86_64` — this is an x86_64-only build running
   under Rosetta on Apple Silicon.
 - Dependencies come from Homebrew x86_64 (`/usr/local/`), not ARM
-  (`/opt/homebrew/`): `freetype gnutls molten-vk sdl2-compat sdl3` plus
-  `bison` ≥ 3.0 and `pkgconf` as build tools.
+  (`/opt/homebrew/`): `freetype gnutls sdl2-compat sdl3` plus `bison` ≥ 3.0
+  and `pkgconf` as build tools.
 - PE modules are cross-compiled with
   [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (`MINGW_DIR`). Its
   `bin/` is **appended** to `PATH`, never prepended — it contains an
@@ -85,12 +86,9 @@ it.
   fails configure loudly instead of silently changing the feature set.
   Note: never pass `--with-opengl` on macOS — it triggers an EGL probe that
   always fails there; the Mac driver links `-framework OpenGL` on its own.
-- Vulkan comes from MoltenVK loaded directly: there is no Vulkan loader and no
-  ICD manifest in the bundle, so nothing has to be pointed at with
-  `VK_ICD_FILENAMES`. Configure finds no `libvulkan`, falls back to
-  `libMoltenVK.dylib` and defines `SONAME_LIBVULKAN` to it; `win32u` dlopens
-  that soname and `winemac.drv` creates surfaces via `VK_EXT_metal_surface`.
-  The dylib ships as `lib/external/libMoltenVK.dylib`.
+- Configured `--without-vulkan`. Nothing in the bundle needs it: D3D10-12 goes
+  through D3DMetal and DXMT (see Direct3D below), and wined3d falls back to its
+  GL backend for D3D9 and older.
 - Bundled dylibs go in `lib/external/` with install names rewritten to
   `@loader_path/`.
 - The bundle script verifies no `/usr/local/` references leak into the final
@@ -116,3 +114,98 @@ To cut a release:
 3. Tag the commit: `git tag cx-26.2.0-0 && git push origin cx-26.2.0-0`.
 4. CI builds the distribution and creates a **draft release** with
    `wine-cx-26.2.0-0-macos-x86_64.tar.xz` attached. Review and publish.
+
+## Direct3D
+
+D3D10, D3D11 and D3D12 do not go through wined3d. Two third-party
+implementations that target Metal directly are installed over Wine's own
+builtins by `bundle-wine.sh`:
+
+- **D3DMetal**, from Apple's Game Porting Toolkit, covers `d3d10`, `d3d11`,
+  `d3d12` and `dxgi` for x86_64.
+- **DXMT** covers `d3d10core`, `d3d11` and `dxgi` for i386, which Apple does
+  not ship.
+
+wined3d stays, but only D3D9, D3D8 and DDraw still reach it (and D3D9 usually
+goes to mtld3d instead). With nothing left that needs a Vulkan backend, the
+build is configured `--without-vulkan` and the bundle step deletes the modules
+that could no longer work: `vulkan-1` and `winevulkan` on both architectures,
+plus `d3d12`/`d3d12core` for i386 and `d3d12core` for x86_64.
+
+| Path | Source |
+|------|--------|
+| `lib/external/D3DMetal.framework`, `libd3dshared.dylib` | D3DMetal |
+| `lib/wine/x86_64-unix/{d3d10,d3d11,d3d12,dxgi,nvapi64,nvngx}.so` | D3DMetal (symlinks to `../../external/libd3dshared.dylib`) |
+| `lib/wine/x86_64-windows/{d3d10,d3d11,d3d12,dxgi,nvapi64,nvngx}.dll` | D3DMetal |
+| `lib/wine/i386-windows/{d3d10core,d3d11,dxgi,winemetal}.dll` | DXMT |
+| `lib/wine/x86_64-unix/winemetal.so` | DXMT |
+
+`nvngx` is Apple's `nvngx-on-metalfx`, renamed on install because that is the
+name games load when they probe for DLSS; it maps onto MetalFX. There is no
+i386 unix half: DXMT's single x86_64 `winemetal.so` serves the 32-bit PE
+modules through its wow64 entry points.
+
+### Where the files come from
+
+`redist/` holds the upstream artifacts unmodified, committed so that a CI
+checkout is all a release build needs:
+
+```
+gptk.dmg     -> Evaluation_environment_for_Windows_games_4.0_beta_2.dmg
+dxmt.tar.gz  -> dxmt-v0.80-builtin.tar.gz
+```
+
+`bundle-wine.sh` reads the stable symlink names, so upgrading either one is a
+matter of dropping the new artifact in and repointing the link. The GPTK image
+is mounted read-only and its `redist/lib` located by search rather than by
+volume name.
+
+Apple's license (`License.rtf`, shipped as `lib/external/D3DMetal-License.rtf`)
+allows distributing the Redistributables unmodified for non-commercial
+purposes. The files are therefore copied byte for byte: no `install_name_tool`,
+no re-signing, and the bundle's `/usr/local` closure walk never touches them,
+which is why the Direct3D step runs after the dylib step rather than inside it.
+
+### What the Wine side provides
+
+The patched tree at [athei/wine](https://github.com/athei/wine) carries the
+glue both implementations bind to:
+
+- `dlls/winemac.drv/d3dmetal.c` exports `macdrv_functions`, a struct of window,
+  Metal device/view/layer, registry and monitor helpers. D3DMetal and DXMT both
+  `dlsym` it out of `winemac.so`.
+- `dlls/ntdll/ntdll.spec` exports `__wine_unix_call` as a callable function
+  (implemented as `__wine_unix_call_exported` in `dlls/ntdll/loader.c`).
+  D3DMetal's PE halves look that name up at runtime; ordinary builtins get the
+  call from `winecrt0` and never need the export.
+- `dlls/ntdll/unix/loader.c` `init_non_native_support()` dlopens
+  `libd3dshared.dylib` and records its `__TEXT` range, which `unix_private.h`
+  uses to pick the ms-ABI unix call entry for calls arriving from Apple code.
+  Without it those calls take the sysv entry and crash. It defaults to
+  `<ntdll_dir>/../../external/libd3dshared.dylib` so the bundle needs no
+  environment setup; `CX_APPLEGPTK_LIBD3DSHARED_PATH` still overrides it. It
+  runs on the first native PE load, so a game triggers it via its own exe.
+- `loader/wine.inf.in` registers `atidxx64.dll`, `nvapi64.dll` and `nvngx.dll`
+  as fake DLLs.
+
+### Caveats
+
+- `macdrv_functions` is a private contract with no version field.
+  `d3dmetal.c` asserts `sizeof(struct macdrv_functions_t) == 192` and
+  `sizeof(struct d3dmetal_macdrv_win_data) == 120`; a mismatch with a newer
+  GPTK or DXMT drop is a crash inside their code, not an error message. Check
+  it on every GPTK, DXMT or CrossOver bump.
+- `init_non_native_support()` is gated on Sonoma or later, and GPTK 4.0 itself
+  wants macOS 15.
+- D3DMetal's client surface goes through `get_win_data(hwnd)`, so it is
+  same-process only. It does not fix cross-process presentation (Steam's CEF
+  GPU process drawing into the browser window); that still needs
+  `--in-process-gpu`.
+- Every builtin has to be in `lib/wine/` before a prefix is created. Outside
+  prefix bootstrap a builtin only loads if a file exists at the Windows path
+  (`is_builtin_path()` returns FALSE once `is_prefix_bootstrap` is clear), and
+  the `11,,*` wildcard in `wine.inf` only creates fake DLLs for what is present
+  when wineboot runs. So `make install` mtld3d and wow-mods into the bundle
+  before first prefix creation; adding a builtin afterwards needs a
+  `wineboot -u`. A bundle redeploy wipes `lib/wine`, so both have to be
+  reinstalled after one.
