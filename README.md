@@ -151,6 +151,28 @@ i386 unix half for either DXMT or mtld3d: a single x86_64 `.so` serves the
 builtin-marked flavor that replaces Wine's own; its tarball's native-override
 variant, prefix markers and arm64 `.so` are not installed.
 
+### Direct3D side trees and the compat database
+
+The default `<arch>-windows` dirs ship **no real D3D 10-12** — only tiny
+fake-module markers so wineboot stamps the `system32`/`syswow64` placeholders a
+builtin needs. Every coherent stack lives in its own self-contained tree:
+
+| Tree | Contents |
+|------|----------|
+| `direct3d/gptk/x86_64-windows` (+ `x86_64-unix`) | D3DMetal dxgi/d3d10/d3d11/d3d12/nvngx/nvapi64 |
+| `direct3d/dxmt/{x86_64,i386}-windows` (+ `x86_64-unix`) | DXMT dxgi/d3d10core/d3d11/winemetal + Wine d3d10/d3d10_1 |
+| `direct3d/wined3d/{x86_64,i386}-windows` | Wine dxgi/d3d10/d3d10core/d3d11/d3d10_1 (no d3d12) |
+
+`cxcompatdb.so` (built and installed by the gamelauncher repo, not here) always
+loads, in every process, and calls `prepend_dll_path` to put exactly one tree
+ahead of the default dir: the architecture default (GPTK on x86_64, DXMT on
+i386) or the stack the compat database names for that process. Because the
+default dir has no real D3D 10-12, nothing is ever mixed and nothing is ever
+disabled — a switch is purely additive. `wined3d.dll` itself, `opengl32`,
+`ddraw`, `d3d8`, `d3d9` (mtld3d) and the `d3dx*` helpers stay in the default dir
+and are reached by fall-through. This bundle ships no `cxcompatdb.so` of its
+own; the slot is filled at `make install` time.
+
 ### Where the files come from
 
 [`redist.env`](redist.env) pins one URL and one SHA-256 per artifact.

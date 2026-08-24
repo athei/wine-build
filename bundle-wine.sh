@@ -251,8 +251,9 @@ trap cleanup EXIT
 # Wine's own D3D12 (vkd3d) and Vulkan modules cannot work in a build configured
 # --without-vulkan, and x86_64 D3D12 is D3DMetal's below. Drop them rather than
 # ship modules that advertise an API they cannot serve. d3d10core stays on both
-# arches: i386's is replaced by DXMT, and Wine's d3d10_1 still reaches the
-# x86_64 one over wined3d/GL.
+# arches: i386's is replaced by DXMT, and on x86_64 it is Wine's, loaded only by
+# the wined3d side tree (D3DMetal's dxgi cannot back it, so the default GPTK
+# stack never reaches it).
 echo "  Removing the modules Vulkan removal orphans..."
 for dead in \
     i386-windows/vulkan-1.dll \
@@ -356,6 +357,102 @@ for arch in i386-windows x86_64-windows; do
 done
 cp "$MTLD3D_SRC/x86_64-unix/mtld3d.so" "$WINE_DIR/lib/wine/x86_64-unix/"
 
+# ── Direct3D: everything additive under direct3d/<stack> ────────────────
+# The default <arch>-windows dirs ship NO real D3D 10-12. cxcompatdb.so always
+# loads and prepends exactly one coherent stack per process (the arch default,
+# or a database override) via prepend_dll_path, so a stack is never mixed and
+# nothing is ever removed. Each stack is a self-contained tree under
+# direct3d/<stack>; the default dirs keep only fake-module markers so wineboot's
+# 11,,* wildcard stamps the system32/syswow64 placeholder every builtin needs.
+echo "  Building Direct3D side trees under direct3d/<stack>..."
+WINEBUILD="$BUILD_DIR/tools/winebuild/winebuild"
+d3d64="$WINE_DIR/lib/wine/x86_64-windows"
+d3d32="$WINE_DIR/lib/wine/i386-windows"
+unix64="$WINE_DIR/lib/wine/x86_64-unix"
+tree="$WINE_DIR/lib/wine/direct3d"
+
+# wined3d (both arches): Wine's own dxgi/d3d10/d3d10core/d3d11/d3d10_1 from the
+# build tree. No d3d12 (vkd3d is unusable --without-vulkan); wined3d.dll itself
+# stays in the default dir (the GL engine, shared, reached by fall-through).
+for arch in i386-windows x86_64-windows; do
+    dest="$tree/wined3d/$arch"
+    mkdir -p "$dest"
+    for dll in dxgi d3d10 d3d10core d3d11 d3d10_1; do
+        src="$BUILD_DIR/dlls/$dll/$arch/$dll.dll"
+        if [ ! -f "$src" ]; then
+            echo "Error: $src not found (run build-wine.sh first)"
+            exit 1
+        fi
+        cp "$src" "$dest/"
+    done
+done
+
+# gptk (x86_64): D3DMetal's dxgi/d3d10/d3d11/d3d12 (+ nvngx/nvapi64), moved out
+# of the default dir, their unixlib symlinks re-pointed at the deeper path.
+gw="$tree/gptk/x86_64-windows"
+gu="$tree/gptk/x86_64-unix"
+mkdir -p "$gw" "$gu"
+for dll in dxgi d3d10 d3d11 d3d12 nvngx nvapi64; do
+    mv -f "$d3d64/$dll.dll" "$gw/$dll.dll"
+    rm -f "$unix64/$dll.so"
+    ln -sf ../../../../external/libd3dshared.dylib "$gu/$dll.so"
+done
+# D3DMetal ships no d3d10core/d3d10_1; Wine's were reachable by GPTK processes
+# in the old default dir (they return E_FAIL on GPTK's dxgi but must be present
+# so anything probing D3D10 keeps its old behaviour rather than failing to
+# load). Pure PE, no unixlib.
+cp "$BUILD_DIR/dlls/d3d10core/x86_64-windows/d3d10core.dll" "$gw/"
+cp "$BUILD_DIR/dlls/d3d10_1/x86_64-windows/d3d10_1.dll"     "$gw/"
+
+# dxmt (x86_64 + i386): DXMT's dxgi/d3d10core/d3d11/winemetal plus Wine's
+# d3d10/d3d10_1. The single x86_64 winemetal.so is shared by both via a symlink;
+# an i386 process finds it under the tree's x86_64-unix (its wow64 unixlib).
+dx64="$tree/dxmt/x86_64-windows"
+dxu="$tree/dxmt/x86_64-unix"
+dx32="$tree/dxmt/i386-windows"
+mkdir -p "$dx64" "$dxu" "$dx32"
+cp "$DXMT_SRC"/x86_64-windows/dxgi.dll \
+   "$DXMT_SRC"/x86_64-windows/d3d10core.dll \
+   "$DXMT_SRC"/x86_64-windows/d3d11.dll \
+   "$DXMT_SRC"/x86_64-windows/winemetal.dll \
+   "$dx64/"
+cp "$BUILD_DIR/dlls/d3d10/x86_64-windows/d3d10.dll"     "$dx64/"
+cp "$BUILD_DIR/dlls/d3d10_1/x86_64-windows/d3d10_1.dll" "$dx64/"
+ln -sf ../../../x86_64-unix/winemetal.so "$dxu/winemetal.so"
+cp "$DXMT_SRC"/i386-windows/dxgi.dll \
+   "$DXMT_SRC"/i386-windows/d3d10core.dll \
+   "$DXMT_SRC"/i386-windows/d3d11.dll \
+   "$DXMT_SRC"/i386-windows/winemetal.dll \
+   "$dx32/"
+cp "$BUILD_DIR/dlls/d3d10/i386-windows/d3d10.dll"     "$dx32/"
+cp "$BUILD_DIR/dlls/d3d10_1/i386-windows/d3d10_1.dll" "$dx32/"
+
+# Empty the default dirs of the rest of the stack (real impls now live in the
+# trees above): Wine's d3d10core/d3d10_1 on x86_64, DXMT's whole i386 set. GPTK
+# was moved above. winemetal.so stays in x86_64-unix (shared backend).
+rm -f "$d3d64/d3d10core.dll" "$d3d64/d3d10_1.dll"
+rm -f "$d3d32"/dxgi.dll "$d3d32"/d3d10.dll "$d3d32"/d3d10core.dll \
+      "$d3d32"/d3d10_1.dll "$d3d32"/d3d11.dll "$d3d32"/winemetal.dll
+
+# Fake-module markers in the default dirs. wineboot's 11,,* wildcard stamps a
+# system32/syswow64 placeholder for each, which is what lets the prepended tree
+# supply the real DLL (a builtin will not load without its placeholder). Each
+# marker mirrors the exports of the real DLL it stands in for.
+echo "  Stamping fake-module markers in the default dirs..."
+mark() { # <out-dir> <32|64> <real-dll> <name>
+    "$WINEBUILD" --fake-module -o "$1/$4.dll" -m"$2" --dll "$3"
+}
+for dll in dxgi d3d10 d3d10core d3d10_1 d3d11 d3d12 winemetal nvngx nvapi64; do
+    for t in gptk/x86_64-windows dxmt/x86_64-windows wined3d/x86_64-windows; do
+        if [ -f "$tree/$t/$dll.dll" ]; then mark "$d3d64" 64 "$tree/$t/$dll.dll" "$dll"; break; fi
+    done
+done
+for dll in dxgi d3d10 d3d10core d3d10_1 d3d11 winemetal; do
+    for t in dxmt/i386-windows wined3d/i386-windows; do
+        if [ -f "$tree/$t/$dll.dll" ]; then mark "$d3d32" 32 "$tree/$t/$dll.dll" "$dll"; break; fi
+    done
+done
+
 # ── Step 5: Verify ──────────────────────────────────────────────────────
 echo "==> Step 5: Verify"
 
@@ -369,8 +466,11 @@ for dylib in "$EXT_DIR"/*.dylib; do
         LEAKED=1
     fi
 done
-# Check .so modules
-for so in "$WINE_DIR"/lib/wine/x86_64-unix/*.so; do
+# Check .so modules, including the side-tree unix libs (symlinks resolve to the
+# real x86_64-unix modules, so this also proves the side-tree links are intact).
+for so in "$WINE_DIR"/lib/wine/x86_64-unix/*.so \
+          "$WINE_DIR"/lib/wine/direct3d/*/x86_64-unix/*.so; do
+    [ -e "$so" ] || continue
     if otool -L "$so" 2>/dev/null | grep -q "/usr/local/"; then
         echo "  ERROR: $(basename "$so") still references /usr/local/"
         LEAKED=1
@@ -388,15 +488,25 @@ MISSING=0
 for want in \
     "lib/external/D3DMetal.framework/Versions/A/D3DMetal" \
     "lib/external/libd3dshared.dylib" \
-    "lib/wine/x86_64-unix/d3d11.so" \
-    "lib/wine/x86_64-unix/nvngx.so" \
-    "lib/wine/x86_64-windows/d3d12.dll" \
     "lib/wine/x86_64-unix/winemetal.so" \
-    "lib/wine/i386-windows/winemetal.dll" \
-    "lib/wine/i386-windows/d3d11.dll" \
     "lib/wine/x86_64-unix/mtld3d.so" \
     "lib/wine/i386-windows/mtld3d.dll" \
-    "lib/wine/x86_64-windows/mtld3d.dll"
+    "lib/wine/x86_64-windows/mtld3d.dll" \
+    "lib/wine/direct3d/gptk/x86_64-windows/dxgi.dll" \
+    "lib/wine/direct3d/gptk/x86_64-windows/d3d12.dll" \
+    "lib/wine/direct3d/gptk/x86_64-unix/d3d11.so" \
+    "lib/wine/direct3d/gptk/x86_64-unix/nvngx.so" \
+    "lib/wine/direct3d/wined3d/x86_64-windows/dxgi.dll" \
+    "lib/wine/direct3d/wined3d/x86_64-windows/d3d10_1.dll" \
+    "lib/wine/direct3d/wined3d/i386-windows/dxgi.dll" \
+    "lib/wine/direct3d/wined3d/i386-windows/d3d10_1.dll" \
+    "lib/wine/direct3d/dxmt/x86_64-windows/dxgi.dll" \
+    "lib/wine/direct3d/dxmt/x86_64-windows/winemetal.dll" \
+    "lib/wine/direct3d/dxmt/x86_64-unix/winemetal.so" \
+    "lib/wine/direct3d/dxmt/i386-windows/dxgi.dll" \
+    "lib/wine/direct3d/dxmt/i386-windows/winemetal.dll" \
+    "lib/wine/x86_64-windows/dxgi.dll" \
+    "lib/wine/i386-windows/dxgi.dll"
 do
     # -e follows symlinks, so this also proves the GPTK .so links resolve.
     if [ ! -e "$WINE_DIR/$want" ]; then
