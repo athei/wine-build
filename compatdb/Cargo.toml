@@ -1,0 +1,16 @@
+[package]
+name = "compatdb"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The per-process compat library wine's ntdll loads as compatdb.so"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+compatdb-table = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true

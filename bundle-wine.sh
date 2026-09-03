@@ -135,7 +135,7 @@ mkdir -p "$EXT_DIR"
 
 # Direct deps: Wine dlopen's these by soname. build-wine.sh patches their
 # sonames in config.h to @loader_path/../../external/<name>, so config.h is
-# the authoritative (version-correct) list — resolve each against /usr/local/lib.
+# the authoritative (version-correct) list; resolve each against /usr/local/lib.
 # Deduplicated, since one library can back several defines.
 CONFIG_H="$BUILD_DIR/include/config.h"
 if [ ! -f "$CONFIG_H" ]; then
@@ -147,12 +147,12 @@ for name in $(sed -n 's|.*"@loader_path/\.\./\.\./external/\([^"]*\)".*|\1|p' "$
     LIBS+=("/usr/local/lib/$name")
 done
 if [ ${#LIBS[@]} -eq 0 ]; then
-    echo "Error: no @loader_path sonames in $CONFIG_H — the build is not"
+    echo "Error: no @loader_path sonames in $CONFIG_H: the build is not"
     echo "relocatable (config.h lost its soname patches). Re-run build-wine.sh."
     exit 1
 fi
 # Homebrew's "libSDL2" is sdl2-compat, a shim that loads real SDL3 at runtime
-# via @loader_path/libSDL3.dylib — so SDL3 must sit beside it in the bundle.
+# via @loader_path/libSDL3.dylib, so SDL3 must sit beside it in the bundle.
 LIBS+=(/usr/local/lib/libSDL3.dylib)
 
 echo "  Copying direct deps..."
@@ -170,7 +170,7 @@ done
 
 # Transitive deps: walk the otool -L closure, copying every /usr/local
 # dependency until no new ones appear. Line 2 of otool -L is the dylib's
-# own install name, not a dependency — skip it.
+# own install name, not a dependency, so skip it.
 echo "  Copying transitive deps..."
 while :; do
     added=0
@@ -196,7 +196,7 @@ while :; do
     [ $added -eq 0 ] && break
 done
 if [ $MISSED -ne 0 ]; then
-    echo "Error: required libraries are missing — bundle would not be self-contained"
+    echo "Error: required libraries are missing, bundle would not be self-contained"
     exit 1
 fi
 chmod +w "$EXT_DIR"/*.dylib
@@ -220,9 +220,12 @@ done
 
 # ── Step 4: Direct3D backends ───────────────────────────────────────────
 # Direct3D comes from three third-party implementations that talk to Metal
-# directly, not from wined3d: Apple's D3DMetal (Game Porting Toolkit) for
-# x86_64 D3D10-12, DXMT for the i386 half of that, which Apple does not cover,
-# and mtld3d for D3D9 on both. wined3d stays behind D3D8 and DDraw only.
+# directly, plus Wine's own wined3d as the fallback for each: Apple's D3DMetal
+# (Game Porting Toolkit) for x86_64 D3D10-12, DXMT for the i386 half of that,
+# which Apple does not cover, and mtld3d for D3D9 on both. Every one of them
+# lives in its own tree under lib/wine/dxgi/<impl> or lib/wine/d3d9/<impl>;
+# the default dirs hold only fake-module markers, and compatdb.so (Step 4b)
+# picks one tree per family per process. D3D8 and DDraw stay on wined3d only.
 #
 # Deliberately after Step 3: that step's dependency walk, chmod and
 # install_name_tool loops all iterate $EXT_DIR/*.dylib, and none of them may
@@ -335,15 +338,13 @@ echo "    $(basename "$DXMT_SRC")"
 cp "$DXMT_SRC"/i386-windows/*.dll "$WINE_DIR/lib/wine/i386-windows/"
 cp "$DXMT_SRC"/x86_64-unix/winemetal.so "$WINE_DIR/lib/wine/x86_64-unix/"
 
-# mtld3d replaces Wine's d3d9 builtin for both PE architectures and adds the
-# mtld3d.dll/mtld3d.so pair the new d3d9.dll bridges to. Its tarball mirrors
-# the lib/wine layout under wine/, but the files are named explicitly rather
-# than copied wholesale: wine/<arch>-windows also carries mtld3d.fake.dll, the
-# prefix marker for installs into an existing prefix, and a marker on the
-# builtin search path would only make wineboot stamp a second, useless one.
-# The prefixes this bundle creates get their marker from wine.inf's wildcard,
-# and aarch64-unix/ is for an arm64 Wine, which this is not.
-echo "  Installing mtld3d (i386/x86_64 d3d9)..."
+# mtld3d's tarball mirrors the lib/wine layout under wine/, but the files are
+# named explicitly rather than copied wholesale: wine/<arch>-windows also
+# carries mtld3d.fake.dll, the prefix marker for installs into an existing
+# prefix, and aarch64-unix/ is for an arm64 Wine, which this is not. The
+# prefixes this bundle creates get their markers from wine.inf's wildcard over
+# the default dirs (stamped below).
+echo "  Unpacking mtld3d..."
 mkdir -p "$TMP_DIR/mtld3d"
 tar xf "$MTLD3D_TAR" -C "$TMP_DIR/mtld3d"
 MTLD3D_SRC="$TMP_DIR/mtld3d/wine"
@@ -351,25 +352,22 @@ if [ ! -d "$MTLD3D_SRC" ]; then
     echo "Error: $(basename "$MTLD3D_TAR") has no wine/ directory"
     exit 1
 fi
-for arch in i386-windows x86_64-windows; do
-    cp "$MTLD3D_SRC/$arch/d3d9.dll" "$MTLD3D_SRC/$arch/mtld3d.dll" \
-       "$WINE_DIR/lib/wine/$arch/"
-done
-cp "$MTLD3D_SRC/x86_64-unix/mtld3d.so" "$WINE_DIR/lib/wine/x86_64-unix/"
 
-# ── Direct3D: everything additive under direct3d/<stack> ────────────────
-# The default <arch>-windows dirs ship NO real D3D 10-12. cxcompatdb.so always
-# loads and prepends exactly one coherent stack per process (the arch default,
-# or a database override) via prepend_dll_path, so a stack is never mixed and
-# nothing is ever removed. Each stack is a self-contained tree under
-# direct3d/<stack>; the default dirs keep only fake-module markers so wineboot's
-# 11,,* wildcard stamps the system32/syswow64 placeholder every builtin needs.
-echo "  Building Direct3D side trees under direct3d/<stack>..."
+# ── Direct3D: everything additive under dxgi/<impl> and d3d9/<impl> ─────
+# The default <arch>-windows dirs ship NO real Direct3D. compatdb.so always
+# loads and prepends exactly one tree per family per process (the arch
+# default, or a database override) via prepend_dll_path, so a DXGI stack is
+# never mixed and nothing is ever removed. Each implementation is a
+# self-contained tree; the default dirs keep only fake-module markers so
+# wineboot's 11,,* wildcard stamps the system32/syswow64 placeholder every
+# builtin needs.
+echo "  Building Direct3D trees under dxgi/<impl> and d3d9/<impl>..."
 WINEBUILD="$BUILD_DIR/tools/winebuild/winebuild"
 d3d64="$WINE_DIR/lib/wine/x86_64-windows"
 d3d32="$WINE_DIR/lib/wine/i386-windows"
 unix64="$WINE_DIR/lib/wine/x86_64-unix"
-tree="$WINE_DIR/lib/wine/direct3d"
+tree="$WINE_DIR/lib/wine/dxgi"
+d3d9tree="$WINE_DIR/lib/wine/d3d9"
 
 # wined3d (both arches): Wine's own dxgi/d3d10/d3d10core/d3d11/d3d10_1 from the
 # build tree. No d3d12 (vkd3d is unusable --without-vulkan); wined3d.dll itself
@@ -434,6 +432,28 @@ rm -f "$d3d64/d3d10core.dll" "$d3d64/d3d10_1.dll"
 rm -f "$d3d32"/dxgi.dll "$d3d32"/d3d10.dll "$d3d32"/d3d10core.dll \
       "$d3d32"/d3d10_1.dll "$d3d32"/d3d11.dll "$d3d32"/winemetal.dll
 
+# D3D9, the second family: mtld3d (the default on both arches) and Wine's own.
+# mtld3d's d3d9.dll bridges to its mtld3d.dll, whose unix half is the single
+# x86_64 mtld3d.so that also serves the i386 PE through its wow64 entry points.
+# wined3d's d3d9.dll needs only wined3d.dll, which stays in the default dir.
+# Wine's d3d9.dll that `make install` put in the default dirs is the one file
+# both trees would shadow, so it goes and a marker takes its place below.
+echo "    d3d9/mtld3d, d3d9/wined3d"
+for arch in i386-windows x86_64-windows; do
+    mkdir -p "$d3d9tree/mtld3d/$arch" "$d3d9tree/wined3d/$arch"
+    cp "$MTLD3D_SRC/$arch/d3d9.dll" "$MTLD3D_SRC/$arch/mtld3d.dll" \
+       "$d3d9tree/mtld3d/$arch/"
+    src="$BUILD_DIR/dlls/d3d9/$arch/d3d9.dll"
+    if [ ! -f "$src" ]; then
+        echo "Error: $src not found (run build-wine.sh first)"
+        exit 1
+    fi
+    cp "$src" "$d3d9tree/wined3d/$arch/"
+done
+mkdir -p "$d3d9tree/mtld3d/x86_64-unix"
+cp "$MTLD3D_SRC/x86_64-unix/mtld3d.so" "$d3d9tree/mtld3d/x86_64-unix/"
+rm -f "$d3d64/d3d9.dll" "$d3d32/d3d9.dll"
+
 # Fake-module markers in the default dirs. wineboot's 11,,* wildcard stamps a
 # system32/syswow64 placeholder for each, which is what lets the prepended tree
 # supply the real DLL (a builtin will not load without its placeholder). Each
@@ -452,6 +472,30 @@ for dll in dxgi d3d10 d3d10core d3d10_1 d3d11 winemetal; do
         if [ -f "$tree/$t/$dll.dll" ]; then mark "$d3d32" 32 "$tree/$t/$dll.dll" "$dll"; break; fi
     done
 done
+for dll in d3d9 mtld3d; do
+    mark "$d3d64" 64 "$d3d9tree/mtld3d/x86_64-windows/$dll.dll" "$dll"
+    mark "$d3d32" 32 "$d3d9tree/mtld3d/i386-windows/$dll.dll" "$dll"
+done
+
+# ── Step 4b: Compat database ────────────────────────────────────────────
+# compatdb.so is what turns the trees above into a working Direct3D: ntdll
+# dlopens <ntdll_dir>/compatdb.so in every process (the slot CrossOver hack
+# 24067 provides) and the library prepends one dxgi/ and one d3d9/ tree,
+# chosen per process from its built-in rules plus whatever WINE_COMPATDB
+# carries. Built here from the compatdb/ crate; x86_64 only, because that is
+# the only Wine in this bundle.
+echo "==> Step 4b: Compat database"
+if ! command -v cargo >/dev/null; then
+    echo "Error: cargo not found (compatdb.so needs a Rust toolchain with the"
+    echo "x86_64-apple-darwin target: rustup target add x86_64-apple-darwin)"
+    exit 1
+fi
+CARGO_TARGET_DIR="$BUILD_DIR/compatdb" \
+    cargo build --quiet --release --manifest-path "$SCRIPT_DIR/Cargo.toml" \
+        -p compatdb --target x86_64-apple-darwin
+echo "    x86_64-unix/compatdb.so"
+cp "$BUILD_DIR/compatdb/x86_64-apple-darwin/release/libcompatdb.dylib" \
+   "$unix64/compatdb.so"
 
 # ── Step 5: Verify ──────────────────────────────────────────────────────
 echo "==> Step 5: Verify"
@@ -469,7 +513,8 @@ done
 # Check .so modules, including the side-tree unix libs (symlinks resolve to the
 # real x86_64-unix modules, so this also proves the side-tree links are intact).
 for so in "$WINE_DIR"/lib/wine/x86_64-unix/*.so \
-          "$WINE_DIR"/lib/wine/direct3d/*/x86_64-unix/*.so; do
+          "$WINE_DIR"/lib/wine/dxgi/*/x86_64-unix/*.so \
+          "$WINE_DIR"/lib/wine/d3d9/*/x86_64-unix/*.so; do
     [ -e "$so" ] || continue
     if otool -L "$so" 2>/dev/null | grep -q "/usr/local/"; then
         echo "  ERROR: $(basename "$so") still references /usr/local/"
@@ -480,7 +525,7 @@ if [ $LEAKED -ne 0 ]; then
     echo "Error: bundle is not self-contained"
     exit 1
 fi
-echo "  All binaries clean — no /usr/local references."
+echo "  All binaries clean, no /usr/local references."
 
 # The Direct3D backends, which are copied in rather than built and so are not
 # covered by anything the build would have caught.
@@ -488,25 +533,30 @@ MISSING=0
 for want in \
     "lib/external/D3DMetal.framework/Versions/A/D3DMetal" \
     "lib/external/libd3dshared.dylib" \
+    "lib/wine/x86_64-unix/compatdb.so" \
     "lib/wine/x86_64-unix/winemetal.so" \
-    "lib/wine/x86_64-unix/mtld3d.so" \
-    "lib/wine/i386-windows/mtld3d.dll" \
-    "lib/wine/x86_64-windows/mtld3d.dll" \
-    "lib/wine/direct3d/gptk/x86_64-windows/dxgi.dll" \
-    "lib/wine/direct3d/gptk/x86_64-windows/d3d12.dll" \
-    "lib/wine/direct3d/gptk/x86_64-unix/d3d11.so" \
-    "lib/wine/direct3d/gptk/x86_64-unix/nvngx.so" \
-    "lib/wine/direct3d/wined3d/x86_64-windows/dxgi.dll" \
-    "lib/wine/direct3d/wined3d/x86_64-windows/d3d10_1.dll" \
-    "lib/wine/direct3d/wined3d/i386-windows/dxgi.dll" \
-    "lib/wine/direct3d/wined3d/i386-windows/d3d10_1.dll" \
-    "lib/wine/direct3d/dxmt/x86_64-windows/dxgi.dll" \
-    "lib/wine/direct3d/dxmt/x86_64-windows/winemetal.dll" \
-    "lib/wine/direct3d/dxmt/x86_64-unix/winemetal.so" \
-    "lib/wine/direct3d/dxmt/i386-windows/dxgi.dll" \
-    "lib/wine/direct3d/dxmt/i386-windows/winemetal.dll" \
+    "lib/wine/dxgi/gptk/x86_64-windows/dxgi.dll" \
+    "lib/wine/dxgi/gptk/x86_64-windows/d3d12.dll" \
+    "lib/wine/dxgi/gptk/x86_64-unix/d3d11.so" \
+    "lib/wine/dxgi/gptk/x86_64-unix/nvngx.so" \
+    "lib/wine/dxgi/wined3d/x86_64-windows/dxgi.dll" \
+    "lib/wine/dxgi/wined3d/x86_64-windows/d3d10_1.dll" \
+    "lib/wine/dxgi/wined3d/i386-windows/dxgi.dll" \
+    "lib/wine/dxgi/wined3d/i386-windows/d3d10_1.dll" \
+    "lib/wine/dxgi/dxmt/x86_64-windows/dxgi.dll" \
+    "lib/wine/dxgi/dxmt/x86_64-windows/winemetal.dll" \
+    "lib/wine/dxgi/dxmt/x86_64-unix/winemetal.so" \
+    "lib/wine/dxgi/dxmt/i386-windows/dxgi.dll" \
+    "lib/wine/dxgi/dxmt/i386-windows/winemetal.dll" \
+    "lib/wine/d3d9/mtld3d/x86_64-unix/mtld3d.so" \
+    "lib/wine/d3d9/mtld3d/i386-windows/mtld3d.dll" \
+    "lib/wine/d3d9/mtld3d/x86_64-windows/mtld3d.dll" \
+    "lib/wine/d3d9/wined3d/i386-windows/d3d9.dll" \
+    "lib/wine/d3d9/wined3d/x86_64-windows/d3d9.dll" \
     "lib/wine/x86_64-windows/dxgi.dll" \
-    "lib/wine/i386-windows/dxgi.dll"
+    "lib/wine/i386-windows/dxgi.dll" \
+    "lib/wine/x86_64-windows/d3d9.dll" \
+    "lib/wine/i386-windows/d3d9.dll"
 do
     # -e follows symlinks, so this also proves the GPTK .so links resolve.
     if [ ! -e "$WINE_DIR/$want" ]; then
@@ -514,11 +564,11 @@ do
         MISSING=1
     fi
 done
-# d3d9.dll exists either way, since Wine builds its own; only a byte
-# comparison proves mtld3d's copy is the one that landed.
+# A d3d9.dll named like mtld3d's could still be Wine's; only a byte comparison
+# proves the right copy landed in the tree.
 for arch in i386-windows x86_64-windows; do
-    if ! cmp -s "$MTLD3D_SRC/$arch/d3d9.dll" "$WINE_DIR/lib/wine/$arch/d3d9.dll"; then
-        echo "  ERROR: $arch/d3d9.dll is not mtld3d's"
+    if ! cmp -s "$MTLD3D_SRC/$arch/d3d9.dll" "$d3d9tree/mtld3d/$arch/d3d9.dll"; then
+        echo "  ERROR: d3d9/mtld3d/$arch/d3d9.dll is not mtld3d's"
         MISSING=1
     fi
 done
@@ -526,7 +576,7 @@ if [ $MISSING -ne 0 ]; then
     echo "Error: Direct3D backends are not installed correctly"
     exit 1
 fi
-echo "  D3DMetal, DXMT and mtld3d in place."
+echo "  D3DMetal, DXMT, mtld3d, wined3d and compatdb.so in place."
 
 WINE_VERSION=$("$WINE_DIR/bin/wine" --version) || {
     echo "Error: bundled wine failed to run"
@@ -534,9 +584,32 @@ WINE_VERSION=$("$WINE_DIR/bin/wine" --version) || {
 }
 echo "  Testing: $WINE_VERSION"
 
+# `wine --version` never loads ntdll, so it proves nothing about compatdb.so.
+# Booting a throwaway prefix does: the library logs one block per process, and
+# its "(from ...)" lines only appear once it found and prepended the trees. The
+# Mono and Gecko installers are kept out so nothing pops a dialog.
+echo "  Booting a throwaway prefix to check compatdb.so..."
+SMOKE_LOG="$TMP_DIR/smoke.log"
+WINEPREFIX="$TMP_DIR/prefix" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
+    "$WINE_DIR/bin/wine" cmd /c exit >/dev/null 2>"$SMOKE_LOG" || {
+    echo "Error: bundled wine failed to boot a prefix"
+    cat "$SMOKE_LOG"
+    exit 1
+}
+# The server is persistent, so it has to be told to go rather than waited for.
+WINEPREFIX="$TMP_DIR/prefix" "$WINE_DIR/bin/wineserver" -k 2>/dev/null || true
+for want in "dxgi = gptk (from" "d3d9 = mtld3d (from"; do
+    if ! grep -q "compatdb: .*$want" "$SMOKE_LOG"; then
+        echo "Error: compatdb.so did not report '$want'"
+        grep "compatdb:" "$SMOKE_LOG" || echo "  (no compatdb lines at all)"
+        exit 1
+    fi
+done
+echo "  compatdb.so loads and finds its trees."
+
 echo ""
 echo "==> Done! Distribution is at:"
 echo "    $DIST_DIR/wine/"
 if [ "$RUNTIME_ONLY" -eq 1 ]; then
-    echo "    (runtime only — no development files)"
+    echo "    (runtime only, no development files)"
 fi

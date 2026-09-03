@@ -88,7 +88,7 @@ fi
 
 # Patch sonames for relocatable bundle. config.status regenerates config.h
 # whenever configure changes (e.g. after a source update), silently reverting
-# the patch — so check before every build, not just on --clean, and re-check
+# the patch, so check before every build, not just on --clean, and re-check
 # after make in case the build itself triggered a regeneration.
 sonames_unpatched() {
     grep -qE '^#define SONAME_(LIBFREETYPE|LIBGNUTLS|LIBSDL2) "lib' "$BUILD_DIR/include/config.h"
@@ -110,7 +110,7 @@ echo "==> Building Wine..."
 arch -x86_64 make -j$(sysctl -n hw.ncpu)
 
 if sonames_unpatched; then
-    echo "==> config.h was regenerated during the build — re-patching and rebuilding..."
+    echo "==> config.h was regenerated during the build, re-patching and rebuilding..."
     patch_sonames
     arch -x86_64 make -j$(sysctl -n hw.ncpu)
 fi

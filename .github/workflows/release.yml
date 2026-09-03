@@ -62,6 +62,11 @@ jobs:
       - name: Build Wine
         run: MINGW_DIR="$HOME/llvm-mingw" scripts/build-wine.sh --clean
 
+      # compatdb.so is a Rust cdylib built by bundle-wine.sh for the x86_64
+      # Wine; the runner is arm64, so the target has to be added.
+      - name: Add the x86_64 Rust target
+        run: rustup target add x86_64-apple-darwin
+
       # The Direct3D redistributables bundle-wine.sh downloads. Keyed on the
       # pin file, so a version bump is the only thing that invalidates it.
       - name: Cache redistributables

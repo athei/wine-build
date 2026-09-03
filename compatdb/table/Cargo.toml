@@ -1,0 +1,9 @@
+[package]
+name = "compatdb-table"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The rule table compatdb.so applies, and the WINE_COMPATDB wire format"
+
+[lints]
+workspace = true
