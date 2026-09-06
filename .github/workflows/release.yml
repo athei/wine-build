@@ -9,6 +9,10 @@ permissions:
 
 env:
   LLVM_MINGW_VERSION: "20260616"
+  # The prebuilt x86_64 prefix, produced by package-deps.sh. See the
+  # "Install the x86_64 dependency prefix" step for why it is not brew.
+  DEPS_URL: "https://github.com/athei/wine-build/releases/download/deps-2026-09-06/wine-deps-macos-x86_64.tar.xz"
+  DEPS_SHA256: "2ec5966b63c0041dc2e3f121c9d9da835567f142d560f444eb2c76be51276a34"
 
 jobs:
   build:
@@ -38,39 +42,34 @@ jobs:
             sudo softwareupdate --install-rosetta --agree-to-license
           fi
 
-      # Homebrew no longer ships x86_64 macOS bottles: gmp, sdl2-compat, sdl3
-      # and pkgconf have none at all, and gnutls/freetype/bison stop at the
-      # sonoma tag, so populating /usr/local means compiling them from source,
-      # which took 48 minutes on cx-26.3.0-3 and timed out on cx-26.3.0-4.
-      # Cache the whole prefix; the two steps below are guarded and turn into
-      # no-ops on a hit. Bump the -v1 by hand when the formula list changes,
-      # since an existing cache key is never overwritten.
-      - name: Cache x86_64 Homebrew
-        uses: actions/cache@v4
-        with:
-          path: /usr/local
-          key: brew-x86_64-macos-26-v1
-
-      - name: Install x86_64 Homebrew
+      # Homebrew has stopped shipping x86_64 macOS bottles: gmp, sdl2-compat
+      # and sdl3 have none at all and the rest stop at the sonoma tag, so
+      # installing these on a runner means compiling them from source. That
+      # took 48 minutes on cx-26.3.0-3 and then stopped working entirely,
+      # because gmp's source cannot be fetched here at all: the runners
+      # resolve neither ftpmirror.gnu.org nor gmplib.org. package-deps.sh
+      # builds the prefix once on a machine that has an Intel Homebrew and it
+      # is mirrored as a release asset; bump DEPS_URL and DEPS_SHA256 when it
+      # is rebuilt.
+      - name: Install the x86_64 dependency prefix
         run: |
-          if [ ! -x /usr/local/bin/brew ]; then
-            NONINTERACTIVE=1 arch -x86_64 /bin/bash -c \
-              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-
-      - name: Install build dependencies
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_ENV_HINTS: "1"
-        run: |
-          for attempt in 1 2 3; do
-            arch -x86_64 /usr/local/bin/brew install \
-              bison pkgconf freetype gnutls sdl2-compat sdl3 && break
-            echo "brew install failed on attempt $attempt"
-            [ "$attempt" = 3 ] && exit 1
-            sleep 30
-          done
+          curl -fsSL --retry 3 -o /tmp/wine-deps.tar.xz "$DEPS_URL"
+          echo "$DEPS_SHA256  /tmp/wine-deps.tar.xz" | shasum -a 256 -c -
+          sudo tar -C /usr/local -xJf /tmp/wine-deps.tar.xz
           echo "/usr/local/opt/bison/bin" >> "$GITHUB_PATH"
+
+      # configure locates the shipped libraries through their .pc files, so it
+      # needs a pkg-config. The image's native one only parses text, so its
+      # architecture does not matter; fail loudly rather than silently build a
+      # Wine with freetype, gnutls and SDL quietly missing.
+      - name: Check pkg-config is available
+        run: |
+          command -v pkg-config >/dev/null || {
+            echo "No pkg-config on the runner image."
+            echo "Add pkgconf to package-deps.sh rather than installing it here."
+            exit 1
+          }
+          pkg-config --version
 
       - name: Install llvm-mingw
         run: |

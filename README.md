@@ -102,13 +102,25 @@ off the `macos-15` runner while a local build on macOS 27 produced `minos 26.0`.
 The SDK is still whatever the build host has; only the minimum is fixed. Check
 this pin still holds whenever the runner image is bumped.
 
-Homebrew has stopped building x86_64 macOS bottles, so the Rosetta Homebrew at
-`/usr/local` would compile gmp, gnutls, sdl2-compat and sdl3 from source on
-every run, which is around 50 minutes and depends on gmplib.org staying up. The
-workflow caches the whole `/usr/local` prefix under a fixed key instead. An
-existing cache key is never overwritten, so bump the `-v1` in
-`Cache x86_64 Homebrew` by hand whenever the formula list changes, or the new
-formula will not be there.
+The workflow does not install Homebrew. Homebrew has stopped shipping x86_64
+macOS bottles (gmp, sdl2-compat and sdl3 have none at all, the rest stop at the
+sonoma tag), so a runner would have to compile them from source: that took 48
+minutes on `cx-26.3.0-3` and then stopped working altogether, because the
+runners resolve neither `ftpmirror.gnu.org` nor `gmplib.org` and gmp's source
+cannot be fetched there at all.
+
+Instead [`package-deps.sh`](package-deps.sh) builds the x86_64 prefix once on a
+machine that has an Intel Homebrew, and the result is mirrored as a release
+asset that the workflow unpacks into `/usr/local`. It ships freetype, gnutls,
+sdl2-compat, sdl3 and bison plus their runtime closure, taken from Homebrew's
+sonoma bottles so the libraries carry a `minos` of 14.0.
+
+To refresh it: `arch -x86_64 /usr/local/bin/brew upgrade` the formulae, run
+`./package-deps.sh`, attach `dist/wine-deps-macos-x86_64.tar.xz` to a new
+`deps-<date>` release, and point `DEPS_URL` and `DEPS_SHA256` in the workflow
+at it. The one thing the prefix does not provide is `pkg-config`, which comes
+from the runner image; the workflow fails loudly if it is missing rather than
+building a Wine with the libraries silently absent.
 
 ## No-execute
 
