@@ -95,6 +95,13 @@ branch, tag or commit of athei/wine that gets built.
 3. `git tag cx-26.2.0-0 && git push origin cx-26.2.0-0`.
 4. Review and publish the draft release.
 
+`build-wine.sh` exports `MACOSX_DEPLOYMENT_TARGET=15.0`. Without it clang takes
+the deployment target from whatever host is building, which made the tarball's
+macOS floor an accident of the runner image: `cx-26.3.0-3` shipped `minos 15.0`
+off the `macos-15` runner while a local build on macOS 27 produced `minos 26.0`.
+The SDK is still whatever the build host has; only the minimum is fixed. Check
+this pin still holds whenever the runner image is bumped.
+
 Homebrew has stopped building x86_64 macOS bottles, so the Rosetta Homebrew at
 `/usr/local` would compile gmp, gnutls, sdl2-compat and sdl3 from source on
 every run, which is around 50 minutes and depends on gmplib.org staying up. The

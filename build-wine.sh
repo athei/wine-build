@@ -26,6 +26,15 @@ if [ ! -x "$MINGW_DIR/bin/arm64ec-w64-mingw32-clang" ]; then
     exit 1
 fi
 
+# Without this, clang takes the deployment target from whatever host is
+# building, so the artifact's macOS floor was an accident of the runner image:
+# cx-26.3.0-3 shipped minos 15.0 off the macos-15 runner, while a local build
+# on macOS 27 produced minos 26.0. Pin it so CI and local builds agree and the
+# floor does not move when the image is bumped. The SDK stays whatever the host
+# has; only the minimum is fixed. compatdb keeps its own lower pin in
+# .cargo/config.toml.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+
 # Parse flags
 CLEAN=0
 if [ "$1" = "--clean" ]; then
