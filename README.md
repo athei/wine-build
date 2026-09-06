@@ -83,7 +83,7 @@ programs symlinks to it.
 ## Releases
 
 [.github/workflows/release.yml](.github/workflows/release.yml) builds on a
-`macos-15` runner (Apple Silicon, Rosetta, x86_64 Homebrew, pinned llvm-mingw)
+`macos-26` runner (Apple Silicon, Rosetta, x86_64 Homebrew, pinned llvm-mingw)
 whenever a `cx-*` tag is pushed and attaches
 `wine-<tag>-macos-x86_64.tar.xz` to a draft release. Tags are named after the
 CrossOver version of the sources plus a build revision, so `cx-26.2.0-0` is
@@ -94,6 +94,14 @@ branch, tag or commit of athei/wine that gets built.
 2. Point `wine-src.ref` at it and push to `main`.
 3. `git tag cx-26.2.0-0 && git push origin cx-26.2.0-0`.
 4. Review and publish the draft release.
+
+Homebrew has stopped building x86_64 macOS bottles, so the Rosetta Homebrew at
+`/usr/local` would compile gmp, gnutls, sdl2-compat and sdl3 from source on
+every run, which is around 50 minutes and depends on gmplib.org staying up. The
+workflow caches the whole `/usr/local` prefix under a fixed key instead. An
+existing cache key is never overwritten, so bump the `-v1` in
+`Cache x86_64 Homebrew` by hand whenever the formula list changes, or the new
+formula will not be there.
 
 ## No-execute
 

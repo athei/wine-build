@@ -105,14 +105,21 @@ if sonames_unpatched; then
     patch_sonames
 fi
 
-# Build
+# Build. make runs natively even though the target is x86_64: clang is a
+# universal binary and CC/CROSSCC above already pin `-arch x86_64`, so putting
+# make under `arch -x86_64` only means translating every compiler invocation.
+# A clean build measured 642s that way against 208s this way, producing the
+# same 2843 artifacts at identical sizes. The tools the build generates for
+# itself (winebuild, widl, wrc, makedep) are x86_64 and get exec'd through
+# Rosetta from this arm64 make, which works and is a small share of the time.
+# Configure above stays translated; that is where the host probing happens.
 echo "==> Building Wine..."
-arch -x86_64 make -j$(sysctl -n hw.ncpu)
+make -j$(sysctl -n hw.ncpu)
 
 if sonames_unpatched; then
     echo "==> config.h was regenerated during the build, re-patching and rebuilding..."
     patch_sonames
-    arch -x86_64 make -j$(sysctl -n hw.ncpu)
+    make -j$(sysctl -n hw.ncpu)
 fi
 
 # The d3d9 test binaries, which bundle-wine.sh publishes so a consumer can run
@@ -123,7 +130,7 @@ fi
 # of a by-product, and costs nothing when they are already built.
 # `dlls/d3d9/tests/all` depends on exactly the two per-arch `d3d9_test.exe`.
 echo "==> Building the d3d9 test binaries..."
-arch -x86_64 make -j$(sysctl -n hw.ncpu) dlls/d3d9/tests/all
+make -j$(sysctl -n hw.ncpu) dlls/d3d9/tests/all
 
 # Verify
 echo "==> Build complete."
@@ -145,7 +152,8 @@ file "$BUILD_DIR/loader/wine"
 #
 # Configure still probes the host side, so every unix dependency is switched
 # off; only the two PE targets below are ever built, which is a small fraction
-# of a full Wine build. Native arm64 throughout, so no `arch -x86_64` here.
+# of a full Wine build. Unlike the tree above, this one is arm64 in both host
+# and target, so configure is not translated either.
 echo "==> Building the arm64ec link libraries..."
 if [ "$CLEAN" -eq 1 ]; then
     rm -rf "$ARM64EC_BUILD_DIR"
