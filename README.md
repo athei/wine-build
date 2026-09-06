@@ -95,6 +95,20 @@ branch, tag or commit of athei/wine that gets built.
 3. `git tag cx-26.2.0-0 && git push origin cx-26.2.0-0`.
 4. Review and publish the draft release.
 
+## No-execute
+
+Wine turned data execution prevention off for a whole process as soon as any
+loaded module lacked the `NX_COMPAT` flag, a DLL included. Turning it off
+makes every readable mapping executable for the rest of the process, and
+under Rosetta each fresh writable and executable page costs a Mach round trip
+on first touch, so a 32-bit program with one 2000s-era DLL turns into a fault
+storm on every allocation
+([#3](https://github.com/athei/wine-build/issues/3)). The patched tree
+decides from the main executable alone, as Windows does: a DLL without the
+flag changes nothing. `WINE_DISABLE_NX_COMPAT=1` keeps no-execute on even
+when the executable itself lacks the flag; a compatdb `env` rule sets it per
+game.
+
 ## Direct3D
 
 Every Direct3D implementation lives in its own tree under `lib/wine`, and the
@@ -233,6 +247,9 @@ The patched tree at athei/wine carries the glue:
   native PE load.
 - `dlls/ntdll/unix/loader.c` dlopens `compatdb.so` and exports
   `prepend_dll_path` and `add_load_order_override` for it.
+- `dlls/ntdll/loader.c` decides no-execute from the main executable alone
+  instead of turning it off for the process as soon as any module lacks
+  `NX_COMPAT`; see [No-execute](#no-execute).
 - `loader/wine.inf.in` registers `atidxx64.dll`, `nvapi64.dll` and
   `nvngx.dll` as fake DLLs.
 
