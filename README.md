@@ -112,8 +112,16 @@ cannot be fetched there at all.
 Instead [`package-deps.sh`](package-deps.sh) builds the x86_64 prefix once on a
 machine that has an Intel Homebrew, and the result is mirrored as a release
 asset that the workflow unpacks into `/usr/local`. It ships freetype, gnutls,
-sdl2-compat, sdl3 and bison plus their runtime closure, taken from Homebrew's
-sonoma bottles so the libraries carry a `minos` of 14.0.
+sdl2-compat, sdl3 and bison plus their runtime closure, mostly taken from
+Homebrew's sonoma bottles so the libraries carry a `minos` of 14.0.
+
+gmp is the exception. It has no x86_64 bottle at all, so Homebrew compiles it
+on whatever machine runs `package-deps.sh` and stamps it with that machine's
+macOS: `cx-26.3.0-8` shipped a `libgmp` at `minos 26.0`, which would not have
+loaded on anything older and would have taken gnutls down with it. The script
+rebuilds gmp against the same floor `build-wine.sh` pins, and then refuses to
+write the archive if any Mach-O in the tree is newer than that floor. If
+another formula loses its bottle, that check is what will catch it.
 
 To refresh it: `arch -x86_64 /usr/local/bin/brew upgrade` the formulae, run
 `./package-deps.sh`, attach `dist/wine-deps-macos-x86_64.tar.xz` to a new

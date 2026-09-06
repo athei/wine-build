@@ -12,7 +12,7 @@ env:
   # The prebuilt x86_64 prefix, produced by package-deps.sh. See the
   # "Install the x86_64 dependency prefix" step for why it is not brew.
   DEPS_URL: "https://github.com/athei/wine-build/releases/download/deps-2026-09-06/wine-deps-macos-x86_64.tar.xz"
-  DEPS_SHA256: "2ec5966b63c0041dc2e3f121c9d9da835567f142d560f444eb2c76be51276a34"
+  DEPS_SHA256: "e88f2070e305b29a21cad490cb243bd4e40cbefb570505c9fefc2bc2b1877c6e"
 
 jobs:
   build:
