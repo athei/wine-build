@@ -497,6 +497,18 @@ echo "    x86_64-unix/compatdb.so"
 cp "$BUILD_DIR/compatdb/x86_64-apple-darwin/release/libcompatdb.dylib" \
    "$unix64/compatdb.so"
 
+# ── Step 4c: Remove inherited quarantine ──────────────────────────────
+# Extracting and copying the checksum-verified redistributables can preserve
+# download quarantine, which blocks libraries such as winemetal.so at load time.
+# Clear only that attribute from the assembled bundle before running it. Keep
+# signatures and other metadata intact; -s acts on symlinks themselves so this
+# cannot change a target outside the bundle.
+echo "==> Step 4c: Remove inherited quarantine"
+if ! xattr -drs com.apple.quarantine "$WINE_DIR"; then
+    echo "Error: failed to remove inherited quarantine from $WINE_DIR" >&2
+    exit 1
+fi
+
 # ── Step 5: Verify ──────────────────────────────────────────────────────
 echo "==> Step 5: Verify"
 

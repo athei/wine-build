@@ -254,6 +254,14 @@ long as its checksum still matches the pin; a mismatch is an error, never a
 silent re-download, so a bump changes both lines. The release workflow caches
 the same directory keyed on the pin file's hash.
 
+Before verification, the bundle step removes inherited `com.apple.quarantine`
+attributes from the assembled `wine/` tree so macOS does not block a copied
+library such as `winemetal.so`. Other attributes and code signatures are
+preserved, and symlink targets outside the bundle are not touched. Failure to
+remove quarantine stops the bundle step. Downloading the finished distribution
+can apply quarantine again; this step only removes metadata inherited from
+the build inputs.
+
 DXMT and mtld3d come from their GitHub releases. Apple's Game Porting Toolkit
 download needs an Apple ID session, so the unmodified dmg is attached to a
 `gptk-<version>` release on this repository (those tags do not trigger the
