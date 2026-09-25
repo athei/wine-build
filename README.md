@@ -140,9 +140,14 @@ on first touch, so a 32-bit program with one 2000s-era DLL turns into a fault
 storm on every allocation
 ([#3](https://github.com/athei/wine-build/issues/3)). The patched tree
 decides from the main executable alone, as Windows does: a DLL without the
-flag changes nothing. `WINE_DISABLE_NX_COMPAT=1` keeps no-execute on even
-when the executable itself lacks the flag; a compatdb `env` rule sets it per
-game.
+flag changes nothing.
+
+Under Rosetta no-execute is also permanently on, like the Windows AlwaysOn
+policy: an executable without the flag keeps it, and a program that tries to
+turn it off gets `STATUS_ACCESS_DENIED`. `WINE_DISABLE_NX_COMPAT=0` restores
+the Windows behaviour for a game that really executes its data; any other
+value keeps no-execute permanently on, on every host. A compatdb `env` rule
+sets it per game.
 
 ## Direct3D
 
@@ -292,7 +297,8 @@ The patched tree at athei/wine carries the glue:
   `prepend_dll_path` and `add_load_order_override` for it.
 - `dlls/ntdll/loader.c` decides no-execute from the main executable alone
   instead of turning it off for the process as soon as any module lacks
-  `NX_COMPAT`; see [No-execute](#no-execute).
+  `NX_COMPAT`, and `dlls/ntdll/unix/process.c` keeps it permanently on under
+  Rosetta; see [No-execute](#no-execute).
 - `loader/wine.inf.in` registers `atidxx64.dll`, `nvapi64.dll` and
   `nvngx.dll` as fake DLLs.
 
