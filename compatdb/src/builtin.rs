@@ -46,9 +46,8 @@ pub fn table() -> Table {
                 exe: "steamwebhelper.exe".into(),
                 company: Some("Valve Corporation".into()),
                 product: Some("Steam Client WebHelper".into()),
-                arguments: vec![
-                    "--in-process-gpu --disable-gpu --disable-software-rasterizer".into(),
-                ],
+                dxgi: Some(Dxgi::Gptk),
+                arguments: vec!["--in-process-gpu".into()],
                 ..Rule::default()
             },
             // GTA IV (Complete Edition). The switch overrides the game's own
