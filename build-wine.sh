@@ -6,9 +6,10 @@ WINE_SRC="${WINE_SRC:-$ROOT/src}"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 
-# arm64ec link libraries, built and staged but never installed or run.
-ARM64EC_BUILD_DIR="${ARM64EC_BUILD_DIR:-$ROOT/build-arm64ec}"
-ARM64EC_LIB_DIR="${ARM64EC_LIB_DIR:-$ROOT/dist/wine-arm64ec}"
+# ARM64X link libraries for linking ARM64X PE builtins, built and staged but
+# never installed or run.
+ARM64X_BUILD_DIR="${ARM64X_BUILD_DIR:-$ROOT/build-arm64x}"
+ARM64X_LIB_DIR="${ARM64X_LIB_DIR:-$ROOT/dist/wine-arm64x}"
 
 if [ ! -f "$WINE_SRC/configure" ]; then
     echo "Error: Wine source not found at $WINE_SRC"
@@ -146,11 +147,13 @@ echo "==> Build complete."
 file "$BUILD_DIR/loader/wine"
 "$BUILD_DIR/loader/wine" --version 2>/dev/null || true
 
-# The arm64ec link libraries, from a second, separate tree. Nothing here is a
-# runnable Wine and none of it is installed: an arm64ec PE builtin needs a
-# `libwinecrt0.a` to take its `unix_lib.o` from and a `libntdll.a` to import
-# from, and that is all this produces. The Wine that eventually loads such a
-# builtin is CrossOver's, not this one.
+# The ARM64X link libraries, from a second, separate tree. The output is two
+# link archives, not a Wine: nothing here is runnable and none of it is
+# installed. An ARM64X PE builtin needs a `libwinecrt0.a` to take its
+# `unix_lib.o` from and a `libntdll.a` to import from, each with an ARM64 and
+# an ARM64EC member, and that is all this produces. The Wine that eventually
+# loads such a builtin is CrossOver's, not this one, and it ships no link
+# archives of its own.
 #
 # arm64ec is paired with aarch64 so makedep sets up ARM64X (`native_archs` /
 # `hybrid_archs`): the pair emits ONE set of libraries under `aarch64-windows`
@@ -163,15 +166,15 @@ file "$BUILD_DIR/loader/wine"
 # off; only the two PE targets below are ever built, which is a small fraction
 # of a full Wine build. Unlike the tree above, this one is arm64 in both host
 # and target, so configure is not translated either.
-echo "==> Building the arm64ec link libraries..."
+echo "==> Building the ARM64X link libraries..."
 if [ "$CLEAN" -eq 1 ]; then
-    rm -rf "$ARM64EC_BUILD_DIR"
+    rm -rf "$ARM64X_BUILD_DIR"
 fi
-mkdir -p "$ARM64EC_BUILD_DIR"
-cd "$ARM64EC_BUILD_DIR"
+mkdir -p "$ARM64X_BUILD_DIR"
+cd "$ARM64X_BUILD_DIR"
 
-if [ "$CLEAN" -eq 1 ] || [ ! -f "$ARM64EC_BUILD_DIR/Makefile" ]; then
-    echo "==> Configuring Wine (arm64ec)..."
+if [ "$CLEAN" -eq 1 ] || [ ! -f "$ARM64X_BUILD_DIR/Makefile" ]; then
+    echo "==> Configuring the ARM64X link library tree (arm64ec,aarch64)..."
     "$WINE_SRC/configure" \
         --enable-archs=arm64ec,aarch64 \
         --with-mingw \
@@ -194,15 +197,18 @@ make -j$(sysctl -n hw.ncpu) \
 
 # Staged in the layout of an installed Wine, so a consumer can point its
 # WINE_SDK at this directory and find the libraries where it expects them.
-echo "==> Staging arm64ec libraries into $ARM64EC_LIB_DIR ..."
-mkdir -p "$ARM64EC_LIB_DIR/lib/wine/aarch64-windows"
-cp "$ARM64EC_BUILD_DIR/dlls/winecrt0/aarch64-windows/libwinecrt0.a" \
-   "$ARM64EC_BUILD_DIR/dlls/ntdll/aarch64-windows/libntdll.a" \
-   "$ARM64EC_LIB_DIR/lib/wine/aarch64-windows/"
+echo "==> Staging the ARM64X link libraries into $ARM64X_LIB_DIR ..."
+mkdir -p "$ARM64X_LIB_DIR/lib/wine/aarch64-windows"
+cp "$ARM64X_BUILD_DIR/dlls/winecrt0/aarch64-windows/libwinecrt0.a" \
+   "$ARM64X_BUILD_DIR/dlls/ntdll/aarch64-windows/libntdll.a" \
+   "$ARM64X_LIB_DIR/lib/wine/aarch64-windows/"
 
-# The EC half is what a consumer links; its absence would mean the ARM64X
-# pairing did not happen and the archive holds ARM64 code only.
-"$MINGW_DIR/bin/llvm-ar" t "$ARM64EC_LIB_DIR/lib/wine/aarch64-windows/libwinecrt0.a" \
-    | grep -q "arm64ec-windows/unix_lib.o" \
-    || { echo "Error: staged libwinecrt0.a carries no arm64ec unix_lib.o"; exit 1; }
-echo "==> arm64ec libraries staged."
+# An ARM64X link takes both halves from the same archive. A missing EC half
+# means the ARM64X pairing did not happen and the archive holds ARM64 code
+# only; a missing ARM64 half means the archive is not the paired one at all.
+WINECRT0_MEMBERS="$("$MINGW_DIR/bin/llvm-ar" t "$ARM64X_LIB_DIR/lib/wine/aarch64-windows/libwinecrt0.a")"
+for member in arm64ec-windows/unix_lib.o aarch64-windows/unix_lib.o; do
+    grep -q "$member" <<<"$WINECRT0_MEMBERS" \
+        || { echo "Error: staged libwinecrt0.a carries no $member"; exit 1; }
+done
+echo "==> ARM64X link libraries staged."

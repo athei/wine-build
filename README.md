@@ -20,11 +20,13 @@ incremental; `--clean` wipes the build directory first, which is also the only
 way to pick up changed configure flags. Before and after every build it makes
 sure the sonames in `config.h` point at `@loader_path/../../external/`, since
 `config.status` silently regenerates the file after a source update. It also
-builds the two `d3d9_test.exe` binaries the bundle carries, and a second,
-arm64ec+aarch64 configured tree that yields only `libwinecrt0.a` and
-`libntdll.a` under `dist/wine-arm64ec/lib/wine/aarch64-windows/`: link
-libraries for arm64ec builtins that CrossOver's arm64 Wine will load, nothing
-runnable.
+builds the two `d3d9_test.exe` binaries the bundle carries, and the ARM64X
+link libraries: a second tree, configured with `arm64ec,aarch64` so the
+archives carry both ARM64 and ARM64EC members, that yields only
+`libwinecrt0.a` and `libntdll.a` under
+`dist/wine-arm64x/lib/wine/aarch64-windows/`. They are for linking ARM64X PE
+builtins that CrossOver's arm64 Wine will load, which ships no link archives
+of its own. Nothing in that tree is runnable.
 
 `bundle-wine.sh` turns the build output into a distributable `wine/` tree:
 staged `make install`, prefix flattened, dylibs copied into `lib/external/`
