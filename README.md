@@ -35,6 +35,14 @@ with `@loader_path` install names, the Direct3D implementations and
 throwaway prefix. `--runtime-only` skips the SDK files and the test binaries;
 that is the flavor that goes into an application.
 
+`--compatdb-only` updates the bundle already at `<dest>/wine` instead of
+building a new one: it builds `compatdb.so`, replaces the installed copy,
+checks the new library for `/usr/local/` references and boots a prefix as a
+full bundle does. There is no prompt, nothing is deleted, `make install` does
+not run, and the Wine build directory is not needed, so it works on an
+unpacked release tarball as well. It keeps whatever flavor the bundle already
+has; `--runtime-only` is accepted next to it and ignored.
+
 The `d3d9_test.exe` binaries land in `lib/wine/tests/{i386,x86_64}-windows/`,
 outside the directories the loader searches, and are plain PEs. Wine's
 `dlls/d3d9/tests` is the de-facto D3D9 conformance suite, so a consumer
@@ -49,6 +57,9 @@ bundle.
 | `BUILD_DIR` | `../build`        | build, bundle |
 | `MINGW_DIR` | `/opt/llvm-mingw` | build, bundle |
 | `CACHE_DIR` | `../cache`        | bundle        |
+
+With `--compatdb-only`, `BUILD_DIR` only hosts cargo's target directory,
+`$BUILD_DIR/compatdb`.
 
 ### Requirements
 
@@ -84,25 +95,66 @@ programs symlinks to it.
 
 ## Releases
 
-[.github/workflows/release.yml](.github/workflows/release.yml) builds on a
-`macos-26` runner (Apple Silicon, Rosetta, x86_64 Homebrew, pinned llvm-mingw)
-whenever a `cx-*` tag is pushed and attaches
-`wine-<tag>-macos-x86_64.tar.xz` to a draft release. Tags are named after the
+There are two kinds of release. Both attach a complete bundle as
+`wine-<tag>-macos-x86_64.tar.xz` to a draft release, with the same `wine/`
+layout, so a consumer does not need to tell them apart.
+
+[.github/workflows/release.yml](.github/workflows/release.yml) builds Wine on
+a GitHub-hosted Apple Silicon runner with Rosetta, the x86_64 dependency
+prefix and llvm-mingw whenever a `cx-*` tag is pushed; the runner image and
+the llvm-mingw version are set in the workflow. Tags are named after the
 CrossOver version of the sources plus a build revision, so `cx-26.2.0-0` is
 the first build from CrossOver 26.2.0. [`wine-src.ref`](wine-src.ref) pins the
-branch, tag or commit of athei/wine that gets built.
+branch, tag or commit of athei/wine that gets built. The bundle includes
+`compatdb.so` built from the same commit of this repository, and the release
+notes name that commit.
 
 1. Push the desired source state to athei/wine.
 2. Point `wine-src.ref` at it and push to `main`.
 3. `git tag cx-26.2.0-0 && git push origin cx-26.2.0-0`.
 4. Review and publish the draft release.
 
-`build-wine.sh` exports `MACOSX_DEPLOYMENT_TARGET=15.0`. Without it clang takes
-the deployment target from whatever host is building, which made the tarball's
-macOS floor an accident of the runner image: `cx-26.3.0-3` shipped `minos 15.0`
-off the `macos-15` runner while a local build on macOS 27 produced `minos 26.0`.
-The SDK is still whatever the build host has; only the minimum is fixed. Check
-this pin still holds whenever the runner image is bumped.
+[.github/workflows/release-compatdb.yml](.github/workflows/release-compatdb.yml)
+runs when a `compatdb-*` tag is pushed and does not build Wine. It downloads
+the tarball of the newest published `cx-*` release (drafts and pre-releases
+are never used), checks it against the digest GitHub recorded for the asset,
+and runs `bundle-wine.sh --compatdb-only` on it with the tagged commit. It
+takes a few minutes instead of hours. The release notes name the tagged commit
+and the `cx-*` release the Wine came from. To use a different base, or to
+build an existing tag again, run it by hand:
+
+```bash
+gh workflow run release-compatdb.yml -f tag=compatdb-2026-10-01 -f base=cx-26.3.0-6
+```
+
+`base` is optional and must be a published `cx-*` release. `gh release create`
+refuses a tag that already has a release, so delete the old draft before
+running it again for the same tag.
+
+A change confined to `compatdb/` (new rules, a fix in the library) can go out
+as `compatdb-*`. Anything that needs the Wine side to change, such as a new
+ntdll export for compatdb to call or a new tree under `lib/wine`, needs a
+`cx-*` release. Tag `cx-*` from a `main` that already contains the compatdb
+changes, since that release builds `compatdb.so` from its own commit.
+
+A published `compatdb-*` release can become the one GitHub marks as Latest.
+Anything that fetches the latest release has to filter by tag prefix rather
+than rely on that marker.
+
+[`build-wine.sh`](build-wine.sh) exports a fixed `MACOSX_DEPLOYMENT_TARGET`,
+and [`.cargo/config.toml`](.cargo/config.toml) sets the same value for
+`compatdb.so`. Without the pin clang takes the deployment target from whatever
+host is building, which made the tarball's macOS floor an accident of the
+runner image: `cx-26.3.0-3` shipped `minos 15.0` off the `macos-15` runner
+while a local build on macOS 27 produced `minos 26.0`. The SDK is still
+whatever the build host has; only the minimum is fixed. Check this pin still
+holds whenever the runner image is bumped.
+
+The pin follows GPTK's D3DMetal, the default for 64-bit D3D10 to D3D12. It
+links `libdxccontainer.dylib`, which needs a newer macOS than mtld3d and DXMT
+do, so a lower floor buys nothing for the default setup. Wine picks up a
+changed pin on the next `build-wine.sh --clean`, which is how CI always
+builds.
 
 The workflow does not install Homebrew. Homebrew has stopped shipping x86_64
 macOS bottles (gmp, sdl2-compat and sdl3 have none at all, the rest stop at the
@@ -113,17 +165,24 @@ cannot be fetched there at all.
 
 Instead [`package-deps.sh`](package-deps.sh) builds the x86_64 prefix once on a
 machine that has an Intel Homebrew, and the result is mirrored as a release
-asset that the workflow unpacks into `/usr/local`. It ships freetype, gnutls,
-sdl2-compat, sdl3 and bison plus their runtime closure, mostly taken from
-Homebrew's sonoma bottles so the libraries carry a `minos` of 14.0.
+asset that the workflow unpacks into `/usr/local`. It ships the packages
+listed in `ROOTS` in [`package-deps.sh`](package-deps.sh) plus their runtime
+closure, mostly taken from Homebrew's sonoma bottles, whose minimum macOS is
+below every floor this repository pins.
 
 gmp is the exception. It has no x86_64 bottle at all, so Homebrew compiles it
 on whatever machine runs `package-deps.sh` and stamps it with that machine's
-macOS: `cx-26.3.0-8` shipped a `libgmp` at `minos 26.0`, which would not have
-loaded on anything older and would have taken gnutls down with it. The script
-rebuilds gmp against the same floor `build-wine.sh` pins, and then refuses to
-write the archive if any Mach-O in the tree is newer than that floor. If
-another formula loses its bottle, that check is what will catch it.
+macOS: one packaging run produced a `libgmp` at `minos 26.0`, which would not
+have loaded on anything older and would have taken gnutls down with it. The
+script rebuilds gmp against its own `MACOS_FLOOR`, and then refuses to write
+the archive if any Mach-O in the tree is newer than that floor. If another
+formula loses its bottle, that check is what will catch it.
+
+The `MACOS_FLOOR` set in [`package-deps.sh`](package-deps.sh) can be lower
+than the deployment target in [`build-wine.sh`](build-wine.sh), and is.
+Libraries built for an older macOS load in a Wine built for a newer one, so
+the prefix only has to be no newer than Wine's floor, not equal to it. Raising
+it would mean rebuilding and uploading the `deps-*` release for no gain.
 
 To refresh it: `arch -x86_64 /usr/local/bin/brew upgrade` the formulae, run
 `./package-deps.sh`, attach `dist/wine-deps-macos-x86_64.tar.xz` to a new
@@ -180,9 +239,9 @@ stays in `lib/wine/x86_64-unix/` as the shared DXMT backend. `nvngx` is
 Apple's `nvngx-on-metalfx`, renamed because that is the name games load when
 they probe for DLSS.
 
-The bundle step deletes what a `--without-vulkan` build can no longer serve:
-`vulkan-1` and `winevulkan` on both arches, `d3d12`/`d3d12core` for i386 and
-`d3d12core` for x86_64.
+The bundle step deletes the Vulkan and D3D12 modules that a
+`--without-vulkan` build cannot back, rather than ship modules that advertise
+an API they cannot serve. The list is in [`bundle-wine.sh`](bundle-wine.sh).
 
 ### compatdb.so
 
@@ -209,23 +268,21 @@ process) plus optional case-insensitive substrings of the version resource's
 `CompanyName`, `ProductName` and `OriginalFilename`. Every matching rule
 applies, folded least specific first (wildcard, then basename, then
 fingerprinted), so a scalar ends up with the most specific rule's value and
-the lists accumulate. The built-in rules, all pinned by version resource:
+the lists accumulate.
 
-- `rockstar-launcher` (`Launcher.exe`, Rockstar Games): `dxgi = wined3d`,
-  because the launcher needs a real D3D10.1 device and D3DMetal has none.
-- `rockstar-social-club-ui` (`SocialClubHelper.exe`, Take-Two):
-  `--in-process-gpu`, since a CEF GPU process cannot paint into another
-  process's window under winemac.
-- `steam-web-helper` (`steamwebhelper.exe`, Valve): `--in-process-gpu
-  --disable-gpu --disable-software-rasterizer`, the same problem plus GPU
-  rendering off.
-- `gta-iv` (`GTAIV.exe`, Rockstar Games): `-availablevidmem 2048.0`, which
-  overrides the game's broken video-memory detection.
+The built-in rules are in
+[`compatdb/src/builtin.rs`](compatdb/src/builtin.rs), each pinned by version
+resource and commented with the reason it exists. They cover launchers that
+need a real D3D10.1 device, which D3DMetal does not provide, embedded
+Chromium (CEF) browsers whose GPU process cannot paint into another process's
+window under winemac, and games that need a command-line switch to work
+around their own detection code.
 
 #### WINE_COMPATDB
 
 Whatever starts the process tree can add or change rules through the
-`WINE_COMPATDB` environment variable. The value is a `v=3` header line
+`WINE_COMPATDB` environment variable. The value is a format header line
+(`HEADER` in [`compatdb/table/src/lib.rs`](compatdb/table/src/lib.rs))
 followed by one rule per line; each rule is `key=value` fields joined by `;`:
 
 ```
@@ -242,9 +299,9 @@ control characters are percent-encoded (`%3B` for `;`); everything else,
 including `=`, passes through. A rule naming a built-in rule is merged into it
 (a set scalar wins, lists append), so an override needs only the fields it
 changes; `enabled=false` drops the rule of that name; a new rule needs an
-`exe`. A header other than `v=3` makes the library ignore the whole value with
-a diagnostic, which is what keeps a format change safe for long-lived
-processes. A malformed line is skipped, never fatal.
+`exe`. A header other than the one the library expects makes it ignore the
+whole value with a diagnostic, which is what keeps a format change safe for
+long-lived processes. A malformed line is skipped, never fatal.
 
 The library writes `compatdb:` lines to wine's stderr: one block per process
 with the image name, its version fingerprint, the rules that matched, the
@@ -271,7 +328,7 @@ the build inputs.
 
 DXMT and mtld3d come from their GitHub releases. Apple's Game Porting Toolkit
 download needs an Apple ID session, so the unmodified dmg is attached to a
-`gptk-<version>` release on this repository (those tags do not trigger the
+`gptk-<version>` release on this repository (those tags trigger neither
 release workflow) and the pin points there; upgrading means downloading the
 new image by hand and creating a new `gptk-*` release. Apple's license
 (shipped as `lib/external/D3DMetal-License.rtf`) allows distributing the
@@ -307,12 +364,14 @@ The patched tree at athei/wine carries the glue:
 ### Caveats
 
 - `macdrv_functions` is a private contract with no version field.
-  `d3dmetal.c` asserts `sizeof(struct macdrv_functions_t) == 192` and
-  `sizeof(struct d3dmetal_macdrv_win_data) == 120`; a mismatch with a newer
-  GPTK or DXMT drop is a crash inside their code, not an error message. Check
-  it on every GPTK, DXMT or CrossOver bump.
-- `init_non_native_support()` is gated on Sonoma or later, and GPTK 4.0 wants
-  macOS 15.
+  `d3dmetal.c` asserts the sizes of `struct macdrv_functions_t` and
+  `struct d3dmetal_macdrv_win_data`; a mismatch with a newer GPTK or DXMT
+  drop is a crash inside their code, not an error message. Check it on every
+  GPTK, DXMT or CrossOver bump.
+- `init_non_native_support()` is gated on Sonoma or later, and D3DMetal
+  needs a newer macOS than the rest of the bundle because it links
+  `libdxccontainer.dylib`. That is what the deployment target in
+  [`build-wine.sh`](build-wine.sh) follows.
 - D3DMetal's client surface goes through `get_win_data(hwnd)`, so it is
   same-process only. Cross-process presentation (Steam's CEF GPU process
   drawing into the browser window) still needs `--in-process-gpu`.
