@@ -1,0 +1,137 @@
+name: Release compatdb
+
+# A compatdb-* tag publishes a full bundle without building Wine: it takes the
+# tarball of a published cx-* release, replaces compatdb.so with one built from
+# the tagged commit, and attaches the result under the same asset name pattern
+# as release.yml. By default the base is the newest published cx-* release; a
+# manual run can name one. Drafts and pre-releases are never used as a base.
+
+on:
+  push:
+    tags: ['compatdb-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing compatdb-* tag to build and release"
+        required: true
+        type: string
+      base:
+        description: "cx-* release to take Wine from (default: the newest published one)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-compatdb-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    # Inputs reach the shell only through the environment, never through
+    # expressions inside a run: script.
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      BASE_INPUT: ${{ inputs.base }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the tag
+        run: |
+          case "$TAG" in
+            compatdb-*) ;;
+            *) echo "Tag '$TAG' is not a compatdb-* tag."; exit 1 ;;
+          esac
+
+      - name: Checkout build scripts
+        uses: actions/checkout@v5
+        with:
+          path: scripts
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Resolve the base release
+        id: base
+        run: |
+          if [ -n "$BASE_INPUT" ]; then
+            case "$BASE_INPUT" in
+              cx-*) ;;
+              *) echo "Base '$BASE_INPUT' is not a cx-* release."; exit 1 ;;
+            esac
+            state=$(gh release view "$BASE_INPUT" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease -q '"\(.isDraft) \(.isPrerelease)"')
+            if [ "$state" != "false false" ]; then
+              echo "Base '$BASE_INPUT' is a draft or a pre-release."
+              exit 1
+            fi
+            base="$BASE_INPUT"
+          else
+            base=$(gh release list --repo "$GITHUB_REPOSITORY" \
+              --exclude-drafts --exclude-pre-releases --limit 100 \
+              --json tagName,publishedAt \
+              -q '[.[] | select(.tagName | startswith("cx-"))] | sort_by(.publishedAt) | last | .tagName // empty')
+            if [ -z "$base" ]; then
+              echo "No published cx-* release to use as the base."
+              exit 1
+            fi
+          fi
+          echo "Base: $base"
+          echo "tag=$base" >> "$GITHUB_OUTPUT"
+
+      # The digest is the one GitHub computed when the asset was uploaded, so
+      # it catches a truncated or corrupted download.
+      - name: Download the base bundle
+        env:
+          BASE: ${{ steps.base.outputs.tag }}
+        run: |
+          asset="wine-${BASE}-macos-x86_64.tar.xz"
+          digest=$(gh release view "$BASE" --repo "$GITHUB_REPOSITORY" --json assets \
+            | jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest')
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "No sha256 digest for $asset on $BASE (got '$digest')."; exit 1 ;;
+          esac
+          gh release download "$BASE" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" --dir "$RUNNER_TEMP"
+          echo "${digest#sha256:}  $RUNNER_TEMP/$asset" | shasum -a 256 -c -
+          mkdir -p dist
+          gtar -C dist -xJf "$RUNNER_TEMP/$asset"
+
+      - name: Ensure Rosetta 2
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+
+      # compatdb.so is a Rust cdylib for the x86_64 Wine; the runner is arm64,
+      # so the target has to be added.
+      - name: Add the x86_64 Rust target
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Replace compatdb.so
+        run: scripts/bundle-wine.sh --compatdb-only --dest "$GITHUB_WORKSPACE/dist"
+
+      - name: Create tarball
+        run: |
+          XZ_OPT="-T0" gtar -C dist -cJf "wine-${TAG}-macos-x86_64.tar.xz" wine
+
+      # The notes name the scripts commit and the base, followed by the first
+      # line of the base release's notes, which names the Wine source commit.
+      - name: Create draft release
+        env:
+          BASE: ${{ steps.base.outputs.tag }}
+        run: |
+          sha=$(git -C scripts rev-parse --short=11 HEAD)
+          base_notes=$(gh release view "$BASE" --repo "$GITHUB_REPOSITORY" --json body \
+            -q '(.body // "") | split("\n") | .[0] // "" | rtrimstr("\r")')
+          notes="compatdb from ${GITHUB_REPOSITORY}@${sha} on Wine ${BASE}"
+          if [ -n "$base_notes" ]; then
+            notes=$(printf '%s\n\n%s: %s' "$notes" "$BASE" "$base_notes")
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "$TAG" \
+            --notes "$notes" \
+            "wine-${TAG}-macos-x86_64.tar.xz"

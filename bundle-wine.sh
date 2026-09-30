@@ -12,6 +12,7 @@ MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 . "$SCRIPT_DIR/redist.env"
 DIST_DIR=""
 RUNTIME_ONLY=0
+COMPATDB_ONLY=0
 
 # `make install` may rebuild any stale targets, including PE modules that need mingw.
 if [ -d "$MINGW_DIR/bin" ]; then
@@ -19,14 +20,18 @@ if [ -d "$MINGW_DIR/bin" ]; then
 fi
 
 usage() {
-    echo "Usage: $0 --dest <dir> [--runtime-only]"
+    echo "Usage: $0 --dest <dir> [--runtime-only] [--compatdb-only]"
     exit 1
 }
 
+# --compatdb-only replaces compatdb.so in the bundle already at <dir>/wine and
+# leaves everything else alone. --runtime-only is accepted alongside it and
+# ignored, since it only affects what a full bundle installs.
 while [ $# -gt 0 ]; do
     case "$1" in
-        --dest) DIST_DIR="$2"; shift 2 ;;
+        --dest) [ $# -ge 2 ] || usage; DIST_DIR="$2"; shift 2 ;;
         --runtime-only) RUNTIME_ONLY=1; shift ;;
+        --compatdb-only) COMPATDB_ONLY=1; shift ;;
         *) usage ;;
     esac
 done
@@ -35,6 +40,20 @@ if [ -z "$DIST_DIR" ]; then
     echo "Error: --dest is required"
     usage
 fi
+
+WINE_DIR="$DIST_DIR/wine"
+unix64="$WINE_DIR/lib/wine/x86_64-unix"
+COMPATDB_BUILD="$BUILD_DIR/compatdb/x86_64-apple-darwin/release/libcompatdb.dylib"
+
+TMP_DIR=$(mktemp -d)
+GPTK_MNT="$TMP_DIR/gptk"
+cleanup() {
+    if [ -d "$GPTK_MNT" ]; then
+        hdiutil detach "$GPTK_MNT" -quiet 2>/dev/null || true
+    fi
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 # fetch <url> <sha256>: download an artifact into $CACHE_DIR, or reuse the
 # cached copy when its checksum still matches the pin. Prints the local path.
@@ -74,8 +93,122 @@ fetch() {
     echo "$target"
 }
 
+# The helpers below exit on failure instead of returning a status. Call them
+# as plain statements, never inside `if` or before `||`: either would turn
+# off set -e for everything they run.
+
+# build_compatdb: build the compatdb/ crate and install it as
+# $unix64/compatdb.so. Cargo reads .cargo/config.toml relative to the working
+# directory, not to --manifest-path, and that file is what pins the macOS
+# floor to 26.0; run from anywhere else, the library gets the toolchain's
+# default floor (minos 10.12). Hence the subshell in $SCRIPT_DIR. The new file
+# is copied next to the old one and renamed over it, so a Wine process that
+# has the old library mapped keeps a valid mapping instead of a file that
+# changes underneath it.
+build_compatdb() {
+    if ! command -v cargo >/dev/null; then
+        echo "Error: cargo not found (compatdb.so needs a Rust toolchain with the"
+        echo "x86_64-apple-darwin target: rustup target add x86_64-apple-darwin)"
+        exit 1
+    fi
+    (cd "$SCRIPT_DIR" && CARGO_TARGET_DIR="$BUILD_DIR/compatdb" \
+        cargo build --quiet --release --manifest-path "$SCRIPT_DIR/Cargo.toml" \
+            -p compatdb --target x86_64-apple-darwin)
+    echo "    x86_64-unix/compatdb.so"
+    cp "$COMPATDB_BUILD" "$unix64/compatdb.so.new"
+    mv -f "$unix64/compatdb.so.new" "$unix64/compatdb.so"
+}
+
+# check_no_usr_local <file>...: report every file whose load commands still
+# reference /usr/local/ and set LEAKED=1. Paths that do not exist (a glob that
+# matched nothing) are skipped. The caller resets LEAKED and acts on it.
+check_no_usr_local() {
+    local f
+    for f in "$@"; do
+        [ -e "$f" ] || continue
+        if otool -L "$f" 2>/dev/null | grep -q "/usr/local/"; then
+            echo "  ERROR: $(basename "$f") still references /usr/local/"
+            LEAKED=1
+        fi
+    done
+}
+
+# smoke_test: run the bundled wine and check that compatdb.so loads in it.
+smoke_test() {
+    local version smoke_log want
+    version=$("$WINE_DIR/bin/wine" --version) || {
+        echo "Error: bundled wine failed to run"
+        exit 1
+    }
+    echo "  Testing: $version"
+
+    # `wine --version` never loads ntdll, so it proves nothing about compatdb.so.
+    # Booting a throwaway prefix does: the library logs one block per process,
+    # and its "(from ...)" lines only appear once it found and prepended the
+    # trees. The Mono and Gecko installers are kept out so nothing pops a dialog.
+    echo "  Booting a throwaway prefix to check compatdb.so..."
+    smoke_log="$TMP_DIR/smoke.log"
+    WINEPREFIX="$TMP_DIR/prefix" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
+        "$WINE_DIR/bin/wine" cmd /c exit >/dev/null 2>"$smoke_log" || {
+        echo "Error: bundled wine failed to boot a prefix"
+        cat "$smoke_log"
+        exit 1
+    }
+    # The server is persistent, so it has to be told to go rather than waited for.
+    WINEPREFIX="$TMP_DIR/prefix" "$WINE_DIR/bin/wineserver" -k 2>/dev/null || true
+    for want in "dxgi = gptk (from" "d3d9 = mtld3d (from"; do
+        if ! grep -q "compatdb: .*$want" "$smoke_log"; then
+            echo "Error: compatdb.so did not report '$want'"
+            grep "compatdb:" "$smoke_log" || echo "  (no compatdb lines at all)"
+            exit 1
+        fi
+    done
+    echo "  compatdb.so loads and finds its trees."
+}
+
+# ── compatdb-only: replace compatdb.so in an existing bundle ────────────
+# For a change confined to the compatdb/ crate. Nothing is wiped, nothing is
+# prompted for and nothing is read from $BUILD_DIR except cargo's target dir,
+# so this works on an unpacked release tarball as well as on a bundle this
+# script built.
+if [ "$COMPATDB_ONLY" -eq 1 ]; then
+    if [ ! -x "$WINE_DIR/bin/wine" ]; then
+        echo "Error: no bundle at $WINE_DIR (--compatdb-only updates an existing"
+        echo "bundle; build one without it first, or unpack a release tarball there)"
+        exit 1
+    fi
+
+    echo "==> Step 1: Build compatdb.so"
+    build_compatdb
+
+    # Same reason as Step 4c of a full bundle. A freshly linked file normally
+    # carries no quarantine, so only remove it when it is there.
+    echo "==> Step 2: Remove inherited quarantine"
+    if xattr -p com.apple.quarantine "$unix64/compatdb.so" >/dev/null 2>&1; then
+        xattr -d com.apple.quarantine "$unix64/compatdb.so"
+    fi
+
+    echo "==> Step 3: Verify"
+    if ! cmp -s "$COMPATDB_BUILD" "$unix64/compatdb.so"; then
+        echo "Error: x86_64-unix/compatdb.so does not match the build output"
+        exit 1
+    fi
+    echo "  compatdb.so: $(file -b "$unix64/compatdb.so")"
+    LEAKED=0
+    check_no_usr_local "$unix64/compatdb.so"
+    if [ $LEAKED -ne 0 ]; then
+        echo "Error: compatdb.so is not self-contained"
+        exit 1
+    fi
+    smoke_test
+
+    echo ""
+    echo "==> Done! compatdb.so updated in:"
+    echo "    $WINE_DIR/"
+    exit 0
+fi
+
 # ── Step 0: Clean previous bundle ──────────────────────────────────────
-WINE_DIR="$DIST_DIR/wine"
 if [ -d "$WINE_DIR" ]; then
     echo "Will delete existing bundle: $WINE_DIR"
     read -r -p "Continue? [y/N] " confirm
@@ -241,16 +374,6 @@ GPTK_DMG=$(fetch "$GPTK_URL" "$GPTK_SHA256")
 DXMT_TAR=$(fetch "$DXMT_URL" "$DXMT_SHA256")
 MTLD3D_TAR=$(fetch "$MTLD3D_URL" "$MTLD3D_SHA256")
 
-TMP_DIR=$(mktemp -d)
-GPTK_MNT="$TMP_DIR/gptk"
-cleanup() {
-    if [ -d "$GPTK_MNT" ]; then
-        hdiutil detach "$GPTK_MNT" -quiet 2>/dev/null || true
-    fi
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT
-
 # Wine's own D3D12 (vkd3d) and Vulkan modules cannot work in a build configured
 # --without-vulkan, and x86_64 D3D12 is D3DMetal's below. Drop them rather than
 # ship modules that advertise an API they cannot serve. d3d10core stays on both
@@ -365,7 +488,6 @@ echo "  Building Direct3D trees under dxgi/<impl> and d3d9/<impl>..."
 WINEBUILD="$BUILD_DIR/tools/winebuild/winebuild"
 d3d64="$WINE_DIR/lib/wine/x86_64-windows"
 d3d32="$WINE_DIR/lib/wine/i386-windows"
-unix64="$WINE_DIR/lib/wine/x86_64-unix"
 tree="$WINE_DIR/lib/wine/dxgi"
 d3d9tree="$WINE_DIR/lib/wine/d3d9"
 
@@ -485,17 +607,7 @@ done
 # carries. Built here from the compatdb/ crate; x86_64 only, because that is
 # the only Wine in this bundle.
 echo "==> Step 4b: Compat database"
-if ! command -v cargo >/dev/null; then
-    echo "Error: cargo not found (compatdb.so needs a Rust toolchain with the"
-    echo "x86_64-apple-darwin target: rustup target add x86_64-apple-darwin)"
-    exit 1
-fi
-CARGO_TARGET_DIR="$BUILD_DIR/compatdb" \
-    cargo build --quiet --release --manifest-path "$SCRIPT_DIR/Cargo.toml" \
-        -p compatdb --target x86_64-apple-darwin
-echo "    x86_64-unix/compatdb.so"
-cp "$BUILD_DIR/compatdb/x86_64-apple-darwin/release/libcompatdb.dylib" \
-   "$unix64/compatdb.so"
+build_compatdb
 
 # ── Step 4c: Remove inherited quarantine ──────────────────────────────
 # Extracting and copying the checksum-verified redistributables can preserve
@@ -516,23 +628,12 @@ echo "  wine binary: $(file "$WINE_DIR/bin/wine" | sed 's|.*/||')"
 
 # Check bundled dylibs have no /usr/local refs
 LEAKED=0
-for dylib in "$EXT_DIR"/*.dylib; do
-    if otool -L "$dylib" | grep -q "/usr/local/"; then
-        echo "  ERROR: $(basename "$dylib") still references /usr/local/"
-        LEAKED=1
-    fi
-done
+check_no_usr_local "$EXT_DIR"/*.dylib
 # Check .so modules, including the side-tree unix libs (symlinks resolve to the
 # real x86_64-unix modules, so this also proves the side-tree links are intact).
-for so in "$WINE_DIR"/lib/wine/x86_64-unix/*.so \
-          "$WINE_DIR"/lib/wine/dxgi/*/x86_64-unix/*.so \
-          "$WINE_DIR"/lib/wine/d3d9/*/x86_64-unix/*.so; do
-    [ -e "$so" ] || continue
-    if otool -L "$so" 2>/dev/null | grep -q "/usr/local/"; then
-        echo "  ERROR: $(basename "$so") still references /usr/local/"
-        LEAKED=1
-    fi
-done
+check_no_usr_local "$WINE_DIR"/lib/wine/x86_64-unix/*.so \
+                   "$WINE_DIR"/lib/wine/dxgi/*/x86_64-unix/*.so \
+                   "$WINE_DIR"/lib/wine/d3d9/*/x86_64-unix/*.so
 if [ $LEAKED -ne 0 ]; then
     echo "Error: bundle is not self-contained"
     exit 1
@@ -590,34 +691,7 @@ if [ $MISSING -ne 0 ]; then
 fi
 echo "  D3DMetal, DXMT, mtld3d, wined3d and compatdb.so in place."
 
-WINE_VERSION=$("$WINE_DIR/bin/wine" --version) || {
-    echo "Error: bundled wine failed to run"
-    exit 1
-}
-echo "  Testing: $WINE_VERSION"
-
-# `wine --version` never loads ntdll, so it proves nothing about compatdb.so.
-# Booting a throwaway prefix does: the library logs one block per process, and
-# its "(from ...)" lines only appear once it found and prepended the trees. The
-# Mono and Gecko installers are kept out so nothing pops a dialog.
-echo "  Booting a throwaway prefix to check compatdb.so..."
-SMOKE_LOG="$TMP_DIR/smoke.log"
-WINEPREFIX="$TMP_DIR/prefix" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
-    "$WINE_DIR/bin/wine" cmd /c exit >/dev/null 2>"$SMOKE_LOG" || {
-    echo "Error: bundled wine failed to boot a prefix"
-    cat "$SMOKE_LOG"
-    exit 1
-}
-# The server is persistent, so it has to be told to go rather than waited for.
-WINEPREFIX="$TMP_DIR/prefix" "$WINE_DIR/bin/wineserver" -k 2>/dev/null || true
-for want in "dxgi = gptk (from" "d3d9 = mtld3d (from"; do
-    if ! grep -q "compatdb: .*$want" "$SMOKE_LOG"; then
-        echo "Error: compatdb.so did not report '$want'"
-        grep "compatdb:" "$SMOKE_LOG" || echo "  (no compatdb lines at all)"
-        exit 1
-    fi
-done
-echo "  compatdb.so loads and finds its trees."
+smoke_test
 
 echo ""
 echo "==> Done! Distribution is at:"

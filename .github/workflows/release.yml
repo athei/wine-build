@@ -105,10 +105,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          sha=$(git -C scripts rev-parse --short=11 HEAD)
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            --notes "Wine distribution built from athei/wine@${{ steps.ref.outputs.ref }}" \
+            --notes "Wine distribution built from athei/wine@${{ steps.ref.outputs.ref }} with ${GITHUB_REPOSITORY}@${sha}" \
             "wine-${GITHUB_REF_NAME}-macos-x86_64.tar.xz"
