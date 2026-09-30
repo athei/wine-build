@@ -1,6 +1,6 @@
 //! Applying a [`Resolution`] to the current process: prepending the Direct3D
-//! trees, adding load-order overrides, and rewriting the command line and
-//! environment in both PEB copies.
+//! trees, adding load-order overrides, setting the DPI awareness, and rewriting
+//! the command line and environment in both PEB copies.
 
 use std::{
     ffi::{CString, OsStr},
@@ -58,6 +58,21 @@ pub fn dll_overrides(nt: &Ntdll, overrides: &[String]) {
     for entry in overrides {
         add_override(nt, entry);
     }
+}
+
+/// Set the process's DPI awareness: system-aware when `aware`, unaware
+/// otherwise. win32u applies the value before the registry and the manifest,
+/// so it wins over both.
+///
+/// Logs the value only when it was handed over, so an ntdll without the hook
+/// shows the one line saying so rather than a value that did not apply.
+pub fn dpi_awareness(nt: &Ntdll, aware: bool) {
+    if !nt.has_set_compat_dpi_awareness() {
+        log::line("ntdll lacks set_compat_dpi_awareness, ignoring dpi_aware");
+        return;
+    }
+    nt.set_compat_dpi_awareness(i32::from(aware));
+    log::line(&format!("  dpi_aware = {aware}"));
 }
 
 /// Rewrite `CommandLine` and `Environment` in the 64-bit params and, for a

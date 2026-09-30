@@ -4,7 +4,7 @@
 //! size/offset assertion, so a mistyped field is a build error rather than
 //! undefined behaviour at runtime.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use std::mem::{offset_of, size_of};
 
 pub type NtStatus = i32;
@@ -186,8 +186,9 @@ type FnAllocateVirtualMemory =
     unsafe extern "C" fn(Handle, *mut *mut c_void, usize, *mut usize, u32, u32) -> NtStatus;
 type FnPrependDllPath = unsafe extern "C" fn(*const c_char);
 type FnAddLoadOrderOverride = unsafe extern "C" fn(*const u16);
+type FnSetCompatDpiAwareness = unsafe extern "C" fn(c_int);
 
-/// The resolved ntdll functions. The first three are required; the two hooks
+/// The resolved ntdll functions. The first three are required; the three hooks
 /// are optional and their features are skipped (with a log line) when absent.
 pub struct Ntdll {
     current_teb: FnCurrentTeb,
@@ -195,6 +196,7 @@ pub struct Ntdll {
     allocate_virtual_memory: FnAllocateVirtualMemory,
     prepend_dll_path: Option<FnPrependDllPath>,
     add_load_order_override: Option<FnAddLoadOrderOverride>,
+    set_compat_dpi_awareness: Option<FnSetCompatDpiAwareness>,
 }
 
 /// Look one symbol up in the default (global) namespace.
@@ -224,6 +226,7 @@ impl Ntdll {
             }
             let prepend = sym(b"prepend_dll_path\0");
             let add_override = sym(b"add_load_order_override\0");
+            let set_dpi = sym(b"set_compat_dpi_awareness\0");
             Some(Self {
                 current_teb: std::mem::transmute::<*mut c_void, FnCurrentTeb>(teb),
                 query_information_process: std::mem::transmute::<
@@ -238,6 +241,8 @@ impl Ntdll {
                 add_load_order_override: (!add_override.is_null()).then(|| {
                     std::mem::transmute::<*mut c_void, FnAddLoadOrderOverride>(add_override)
                 }),
+                set_compat_dpi_awareness: (!set_dpi.is_null())
+                    .then(|| std::mem::transmute::<*mut c_void, FnSetCompatDpiAwareness>(set_dpi)),
             })
         }
     }
@@ -313,6 +318,20 @@ impl Ntdll {
             // SAFETY: `entry` points at a NUL-terminated UTF-16 string valid
             // for the duration of the call.
             unsafe { f(entry) }
+        }
+    }
+
+    pub const fn has_set_compat_dpi_awareness(&self) -> bool {
+        self.set_compat_dpi_awareness.is_some()
+    }
+
+    /// Tell ntdll whether this process is DPI-aware: 1 for aware, 0 for
+    /// unaware. win32u reads the value back when it first sets the process
+    /// awareness, before it looks at the registry or the manifest.
+    pub fn set_compat_dpi_awareness(&self, aware: c_int) {
+        if let Some(f) = self.set_compat_dpi_awareness {
+            // SAFETY: the hook takes a plain int and only stores it.
+            unsafe { f(aware) }
         }
     }
 }

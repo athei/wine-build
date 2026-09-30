@@ -6,9 +6,10 @@
 //! It holds the built-in rules, overlays the ones passed in
 //! [`ENV_VAR`](compatdb_table::ENV_VAR), resolves the rules that match this
 //! process and applies them: the D3D9 and DXGI trees, DLL load-order
-//! overrides, and command-line/environment rewrites. All the decision logic
-//! lives in [`compatdb_table`]; this crate only moves bytes in and out of the
-//! running process, so its `unsafe` is confined to a thin ntdll shell.
+//! overrides, the DPI awareness, and command-line/environment rewrites. All
+//! the decision logic lives in [`compatdb_table`]; this crate only moves bytes
+//! in and out of the running process, so its `unsafe` is confined to a thin
+//! ntdll shell.
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -108,6 +109,9 @@ fn run() {
             resolution.dll_overrides.join(";")
         ));
         apply::dll_overrides(&nt, &resolution.dll_overrides);
+    }
+    if let Some(aware) = resolution.dpi_aware {
+        apply::dpi_awareness(&nt, aware);
     }
     if !resolution.arguments.is_empty() {
         log::line(&format!("  arguments = {}", resolution.arguments.join(" ")));

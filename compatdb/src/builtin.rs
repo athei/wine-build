@@ -6,8 +6,9 @@
 //!
 //! Every rule that names an executable also carries a version fingerprint, so
 //! none of them can catch an unrelated program that happens to share a file
-//! name. The one exception is `no-vulkan`, which matches every process on
-//! purpose.
+//! name. The exceptions are `no-vulkan`, `dpi-aware` and `no-mono-gecko`,
+//! which match every process on purpose: each is a default that a more
+//! specific rule can override and that can be dropped by name.
 
 use compatdb_table::{ANY_EXE, Dxgi, Rule, Table};
 
@@ -26,6 +27,33 @@ pub fn table() -> Table {
                 name: "no-vulkan".into(),
                 exe: ANY_EXE.into(),
                 dll_overrides: vec!["vulkan-1=".into()],
+                ..Rule::default()
+            },
+            // Programs under this Wine are treated as DPI-aware unless a rule
+            // says otherwise. An unaware program on a scaled desktop gets its
+            // window and mouse coordinates scaled while display modes are
+            // not, so a game that sizes itself from the mode list draws and
+            // reads the pointer in two different coordinate spaces.
+            Rule {
+                name: "dpi-aware".into(),
+                exe: ANY_EXE.into(),
+                dpi_aware: Some(true),
+                ..Rule::default()
+            },
+            // Keeps Wine from prompting to install Mono and Gecko, in
+            // wineboot and in any process that loads either. It is a separate
+            // rule so disabling `no-vulkan` does not bring the prompts back.
+            //
+            // The override disables both modules, not only the prompts. ntdll
+            // consults the overrides compatdb adds before the registry
+            // DllOverrides keys, so an installed wine-mono, Gecko or native
+            // .NET selected there stays disabled too. A prefix that needs one
+            // either drops this rule (`name=no-mono-gecko;enabled=false`) or
+            // adds a later entry for the module, such as `mscoree=n,b`.
+            Rule {
+                name: "no-mono-gecko".into(),
+                exe: ANY_EXE.into(),
+                dll_overrides: vec!["mscoree,mshtml=".into()],
                 ..Rule::default()
             },
             // The Rockstar Games Launcher needs a real D3D10.1 device, which
@@ -88,9 +116,25 @@ pub fn table() -> Table {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use compatdb_table::VersionInfo;
+    use compatdb_table::{HEADER, VersionInfo};
 
     use super::*;
+
+    /// The names of the rules that match every process, in table order.
+    fn wildcards() -> Vec<String> {
+        vec![
+            "no-vulkan".to_string(),
+            "dpi-aware".to_string(),
+            "no-mono-gecko".to_string(),
+        ]
+    }
+
+    /// `wildcards()` followed by one more specific rule.
+    fn wildcards_and(name: &str) -> Vec<String> {
+        let mut names = wildcards();
+        names.push(name.to_string());
+        names
+    }
 
     #[test]
     fn the_builtin_table_pins_the_launcher_and_round_trips() {
@@ -115,8 +159,9 @@ mod tests {
     #[test]
     fn every_builtin_rule_has_a_unique_name_and_none_matches_a_bare_basename() {
         // A rule naming an executable must also pin its version resource, or
-        // it would catch every program of that name. The `*` rule is a
-        // different case: it is meant for every process.
+        // it would catch every program of that name. The `*` rules are a
+        // different case: they are meant for every process, and several of
+        // them are not duplicates of each other.
         let table = table();
         for rule in &table.rules {
             assert!(!rule.name.is_empty(), "{} has no name", rule.exe);
@@ -136,50 +181,152 @@ mod tests {
     }
 
     #[test]
-    fn every_process_gets_the_vulkan_loader_disabled() {
+    fn every_process_gets_the_wildcard_defaults() {
         let resolution = table().resolve("game.exe", &VersionInfo::default());
-        assert_eq!(resolution.matched, vec!["no-vulkan".to_string()]);
-        assert_eq!(resolution.dll_overrides, vec!["vulkan-1=".to_string()]);
+        assert_eq!(resolution.matched, wildcards());
+        assert_eq!(
+            resolution.dll_overrides,
+            vec!["vulkan-1=".to_string(), "mscoree,mshtml=".to_string()]
+        );
+        assert_eq!(resolution.dpi_aware, Some(true));
     }
 
     #[test]
-    fn a_game_rule_re_enables_vulkan_after_the_builtin_disables_it() {
-        // ntdll lets the last override for a module win, so the game's entry
-        // has to come after the built-in one. That holds wherever the game's
-        // rule is declared, because the `*` rule is folded first.
+    fn disabling_dpi_aware_leaves_the_awareness_to_wine() {
         let mut table = table();
-        let (over, diagnostics) =
-            Table::parse("v=3\nname=my-game;exe=game.exe;dll_overrides=vulkan-1=n");
+        let (over, diagnostics) = Table::parse(&format!("{HEADER}\nname=dpi-aware;enabled=false"));
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(table.overlay(over).is_empty());
-        let resolution = table.resolve("Game.exe", &VersionInfo::default());
+        let resolution = table.resolve("game.exe", &VersionInfo::default());
+        assert_eq!(resolution.dpi_aware, None);
         assert_eq!(
-            resolution.dll_overrides,
-            vec!["vulkan-1=".to_string(), "vulkan-1=n".to_string()]
+            resolution.matched,
+            vec!["no-vulkan".to_string(), "no-mono-gecko".to_string()]
         );
-        // Another process still has it disabled.
+    }
+
+    #[test]
+    fn a_launch_wide_rule_beats_the_builtin_dpi_default() {
+        // Both are plain `*` rules, so specificity does not separate them.
+        // The launcher's rule has a new name, so the overlay appends it after
+        // the built-ins, and the stable sort in `resolve` keeps that order.
+        let mut table = table();
+        let (over, diagnostics) =
+            Table::parse(&format!("{HEADER}\nname=global;exe=*;dpi_aware=false"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        let resolution = table.resolve("game.exe", &VersionInfo::default());
+        assert_eq!(resolution.dpi_aware, Some(false));
+        assert_eq!(resolution.matched, wildcards_and("global"));
+    }
+
+    #[test]
+    fn a_rule_for_one_program_makes_it_unaware() {
+        let mut table = table();
+        let (over, diagnostics) =
+            Table::parse(&format!("{HEADER}\nname=old;exe=old.exe;dpi_aware=false"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        assert_eq!(
+            table.resolve("Old.exe", &VersionInfo::default()).dpi_aware,
+            Some(false)
+        );
         assert_eq!(
             table
                 .resolve("other.exe", &VersionInfo::default())
+                .dpi_aware,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_launch_wide_rule_re_enables_mono_after_the_builtins() {
+        // What a launcher sends for a top-level `dll_overrides`: its own `*`
+        // rule. Within the wildcard tier the rules fold in table order, which
+        // puts the built-ins first, and ntdll keeps the last entry for a
+        // module, so `mscoree=b` wins while mshtml stays disabled.
+        let mut table = table();
+        let (over, diagnostics) = Table::parse(&format!(
+            "{HEADER}\nname=global;exe=*;dll_overrides=mscoree=b"
+        ));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        let resolution = table.resolve("game.exe", &VersionInfo::default());
+        assert_eq!(
+            resolution.dll_overrides,
+            vec![
+                "vulkan-1=".to_string(),
+                "mscoree,mshtml=".to_string(),
+                "mscoree=b".to_string()
+            ]
+        );
+        assert_eq!(resolution.matched, wildcards_and("global"));
+        assert!(table.duplicate_matchers().is_empty());
+    }
+
+    #[test]
+    fn disabling_no_mono_gecko_drops_only_its_override() {
+        let mut table = table();
+        let (over, _) = Table::parse(&format!("{HEADER}\nname=no-mono-gecko;enabled=false"));
+        assert!(table.overlay(over).is_empty());
+        assert_eq!(
+            table
+                .resolve("game.exe", &VersionInfo::default())
                 .dll_overrides,
             vec!["vulkan-1=".to_string()]
         );
     }
 
     #[test]
+    fn a_game_rule_re_enables_vulkan_after_the_builtin_disables_it() {
+        // ntdll lets the last override for a module win, so the game's entry
+        // has to come after the built-in one. That holds wherever the game's
+        // rule is declared, because the `*` rules are folded first.
+        let mut table = table();
+        let (over, diagnostics) = Table::parse(&format!(
+            "{HEADER}\nname=my-game;exe=game.exe;dll_overrides=vulkan-1=n"
+        ));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        let resolution = table.resolve("Game.exe", &VersionInfo::default());
+        assert_eq!(
+            resolution.dll_overrides,
+            vec![
+                "vulkan-1=".to_string(),
+                "mscoree,mshtml=".to_string(),
+                "vulkan-1=n".to_string()
+            ]
+        );
+        // Another process still has it disabled.
+        assert_eq!(
+            table
+                .resolve("other.exe", &VersionInfo::default())
+                .dll_overrides,
+            vec!["vulkan-1=".to_string(), "mscoree,mshtml=".to_string()]
+        );
+    }
+
+    #[test]
     fn disabling_no_vulkan_drops_the_override() {
         let mut table = table();
-        let (over, _) = Table::parse("v=3\nname=no-vulkan;enabled=false");
+        let (over, _) = Table::parse(&format!("{HEADER}\nname=no-vulkan;enabled=false"));
         assert!(table.overlay(over).is_empty());
         let resolution = table.resolve("game.exe", &VersionInfo::default());
-        assert!(resolution.matched.is_empty());
-        assert!(resolution.dll_overrides.is_empty());
+        assert_eq!(
+            resolution.matched,
+            vec!["dpi-aware".to_string(), "no-mono-gecko".to_string()]
+        );
+        // The Mono and Gecko prompts stay off.
+        assert_eq!(
+            resolution.dll_overrides,
+            vec!["mscoree,mshtml=".to_string()]
+        );
     }
 
     #[test]
     fn a_game_override_merges_into_the_builtin_it_names() {
         let mut table = table();
-        let (over, _) = Table::parse("v=3\nname=rockstar-launcher;dxgi=dxmt");
+        let (over, _) = Table::parse(&format!("{HEADER}\nname=rockstar-launcher;dxgi=dxmt"));
         assert!(table.overlay(over).is_empty());
         let launcher = table
             .rules
@@ -204,7 +351,7 @@ mod tests {
         };
         assert_eq!(
             table.resolve("steamwebhelper.exe", &steam).matched,
-            vec!["no-vulkan".to_string(), "steam-web-helper".to_string()]
+            wildcards_and("steam-web-helper")
         );
         let social = VersionInfo {
             company: "Take-Two Interactive Software, Inc.".into(),
@@ -213,10 +360,7 @@ mod tests {
         };
         assert_eq!(
             table.resolve("SocialClubHelper.exe", &social).matched,
-            vec![
-                "no-vulkan".to_string(),
-                "rockstar-social-club-ui".to_string()
-            ]
+            wildcards_and("rockstar-social-club-ui")
         );
         let gta = VersionInfo {
             company: "Rockstar Games".into(),
@@ -225,10 +369,10 @@ mod tests {
         };
         assert_eq!(
             table.resolve("GTAIV.exe", &gta).matched,
-            vec!["no-vulkan".to_string(), "gta-iv".to_string()]
+            wildcards_and("gta-iv")
         );
-        // An unrelated program of the same name gets only the `*` rule.
-        let only_wildcard = vec!["no-vulkan".to_string()];
+        // An unrelated program of the same name gets only the `*` rules.
+        let only_wildcard = wildcards();
         assert_eq!(
             table
                 .resolve("steamwebhelper.exe", &VersionInfo::default())

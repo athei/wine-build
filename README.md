@@ -258,6 +258,11 @@ name and version resource, resolves the rules that match, and applies them:
   a log line, so `dxgi = gptk` in a rule reads as "GPTK where it exists".
 - `dll_overrides`: `WINEDLLOVERRIDES`-style `names=order` entries, added
   through ntdll's load-order hook.
+- `dpi_aware`: `true` makes the process DPI-aware (system-aware), `false`
+  makes it unaware. The value is exactly `true` or `false`, case-sensitive.
+  win32u applies a rule's value before it looks at the `AppCompatFlags\Layers`
+  registry value and the manifest, and the first setting wins, so the rule
+  beats both. Unset leaves the decision to them.
 - `arguments`: text appended to the command line unless already present,
   which leaves a Chromium child that inherited its parent's switches alone.
 - `env`: `NAME=value` entries written into the process's environment block
@@ -272,18 +277,48 @@ the lists accumulate.
 
 The built-in rules are in
 [`compatdb/src/builtin.rs`](compatdb/src/builtin.rs), each commented with the
-reason it exists. All but `no-vulkan` are pinned by version resource. They
-cover launchers that need a real D3D10.1 device, which D3DMetal does not
-provide, embedded Chromium (CEF) browsers whose GPU process cannot paint into
-another process's window under winemac, and games that need a command-line
-switch to work around their own detection code.
+reason it exists. Three of them, `no-vulkan`, `dpi-aware` and
+`no-mono-gecko`, match every process (`exe` is `*`) and are described below.
+The rest are pinned by version resource. They cover launchers that need a
+real D3D10.1 device, which D3DMetal does not provide, embedded Chromium (CEF)
+browsers whose GPU process cannot paint into another process's window under
+winemac, and games that need a command-line switch to work around their own
+detection code.
 
-`no-vulkan` matches every process (`exe` is `*`) and adds the override
-`vulkan-1=`, which disables the Vulkan loader. The bundle has no Vulkan: Wine
-is built `--without-vulkan` and the bundle step deletes the Vulkan modules
-(the list is in [`bundle-wine.sh`](bundle-wine.sh)). A Vulkan loader that a
-game ships next to its executable can therefore only fail. With the override,
-`vulkan-1.dll` fails to load, and a game that has another renderer uses it.
+`no-vulkan` adds the override `vulkan-1=`, which disables the Vulkan loader.
+The bundle has no Vulkan: Wine is built `--without-vulkan` and the bundle
+step deletes the Vulkan modules (the list is in
+[`bundle-wine.sh`](bundle-wine.sh)). A Vulkan loader that a game ships next
+to its executable can therefore only fail. With the override, `vulkan-1.dll`
+fails to load, and a game that has another renderer uses it.
+
+`dpi-aware` sets `dpi_aware = true`, so every process under this build is
+system-aware by default, including a plain `wine foo.exe`. An unaware program
+on a scaled desktop gets its window and mouse coordinates scaled while display
+modes are not, so a game that sizes itself from the mode list draws at one
+size and reads the pointer at another. The default also caps a program that
+asks for per-monitor awareness, by manifest or by its own call, at
+system-aware, because the first context set for a process wins. A rule for
+one executable with `dpi_aware=false` makes that program unaware again, and
+`name=dpi-aware;enabled=false` restores upstream behaviour for every process:
+the registry and the manifest decide.
+
+`no-mono-gecko` adds the override `mscoree,mshtml=`, which keeps Wine from
+prompting to install Mono and Gecko, in wineboot and in any process that
+loads either. It is a separate rule so that disabling `no-vulkan` does not
+bring the prompts back. The override disables both modules, not only the
+prompts: ntdll consults the overrides compatdb adds before the registry
+`DllOverrides` keys, so a wine-mono or Gecko installed in the prefix, or a
+native .NET selected through the registry, stays disabled as well. A prefix
+that needs one has two ways out: `name=no-mono-gecko;enabled=false`, or a
+rule that adds `mscoree=n,b` (see [WINE_COMPATDB](#wine_compatdb)).
+
+Several `*` rules are not a conflict. They are folded in table order, the
+built-in ones first, and `duplicate_matchers` does not report them. That
+order is also how a launch-wide override works: a `*` rule added through
+`WINE_COMPATDB` comes after the built-in ones, so
+`name=global;exe=*;dpi_aware=false` beats the `dpi-aware` default for every
+process that no more specific rule covers.
 
 #### WINE_COMPATDB
 
@@ -293,44 +328,60 @@ Whatever starts the process tree can add or change rules through the
 followed by one rule per line; each rule is `key=value` fields joined by `;`:
 
 ```
-v=3
-name=my-game;exe=Game.exe;company=Some Vendor;d3d9=wined3d;env=MTLD3D_CONFIG=adapter.spoof=amd
+v=4
+name=my-game;exe=Game.exe;company=Some Vendor;d3d9=wined3d;dpi_aware=false;env=MTLD3D_CONFIG=adapter.spoof=amd
 name=rockstar-launcher;dxgi=dxmt
 name=steam-web-helper;enabled=false
 ```
 
 Keys: `name` (required), `exe`, `company`, `product`, `original_filename`,
-`dxgi`, `d3d9`, `dll_overrides`, `arguments`, `env` (repeatable, value
-`NAME=value`) and `enabled`. Inside a value, `%`, `;`, CR, LF and other
-control characters are percent-encoded (`%3B` for `;`); everything else,
-including `=`, passes through. A rule naming a built-in rule is merged into it
-(a set scalar wins, lists append), so an override needs only the fields it
-changes; `enabled=false` drops the rule of that name; a new rule needs an
-`exe`. A header other than the one the library expects makes it ignore the
-whole value with a diagnostic, which is what keeps a format change safe for
-long-lived processes. A malformed line is skipped, never fatal.
+`dxgi`, `d3d9`, `dpi_aware` (`true` or `false`), `dll_overrides`,
+`arguments`, `env` (repeatable, value `NAME=value`) and `enabled`. A value
+the library does not know for `dxgi`, `d3d9` or `dpi_aware` drops that rule
+with a diagnostic; `dpi_aware` takes exactly `true` or `false`, so `TRUE` or
+`1` is such a value. Inside a value, `%`, `;`, CR, LF and other control
+characters are percent-encoded (`%3B` for `;`); everything else, including
+`=`, passes through. A rule naming a built-in rule is merged into it (a set
+scalar wins, lists append), so an override needs only the fields it changes;
+`enabled=false` drops the rule of that name; a new rule needs an `exe`. A
+malformed line is skipped, never fatal.
+
+A header other than the one the library expects makes it ignore the whole
+value with a diagnostic, which is what keeps a format change safe for
+long-lived processes. It also means a `v=4` library drops the whole table of
+a launcher that still sends `v=3`, so the launcher and `compatdb.so` have to
+be updated together.
 
 To let one game load its own Vulkan loader, give it a rule for its
 executable that adds `vulkan-1=n`:
 
 ```
-v=3
+v=4
 name=my-game;exe=Game.exe;dll_overrides=vulkan-1=n
 ```
 
-The `*` rule is folded first, so the game's entry is added after
+The `*` rules are folded first, so the game's entry is added after
 `vulkan-1=` and ntdll keeps the last entry for a module. To drop the built-in
 rule for every process instead, use `name=no-vulkan;enabled=false`.
 `WINEDLLOVERRIDES=vulkan-1=n` alone does not re-enable it: ntdll parses that
 variable first, and an override compatdb adds replaces the entry for the same
 module.
 
+Mono and Gecko work the same way. A raw `WINEDLLOVERRIDES=mscoree=b` no
+longer re-enables Mono, because the built-in `mscoree,mshtml=` replaces the
+entry for the same module. A rule does:
+`name=mono;exe=*;dll_overrides=mscoree=b` is folded after the built-in `*`
+rules, and a rule for one executable is folded after every `*` rule. Use
+`mscoree=n,b` instead to prefer a native .NET.
+`name=no-mono-gecko;enabled=false` drops the built-in override for both
+modules in every process, which hands the decision back to the registry.
+
 The library writes `compatdb:` lines to wine's stderr: one block per process
 with the image name, its version fingerprint, the rules that matched, the
-trees it prepended, the overrides it added, and any parse diagnostics. To
-confirm a tree took effect, look at the running process's mapped files
-(`lsof -p <pid> | grep -i dxgi.dll`): a path under `lib/wine/dxgi/<impl>/` or
-`lib/wine/d3d9/<impl>/` proves it.
+trees it prepended, the overrides it added, the DPI awareness it set, and any
+parse diagnostics. To confirm a tree took effect, look at the running
+process's mapped files (`lsof -p <pid> | grep -i dxgi.dll`): a path under
+`lib/wine/dxgi/<impl>/` or `lib/wine/d3d9/<impl>/` proves it.
 
 ### Where the files come from
 
@@ -375,7 +426,11 @@ The patched tree at athei/wine carries the glue:
   `CX_APPLEGPTK_LIBD3DSHARED_PATH` as an override, and runs on the first
   native PE load.
 - `dlls/ntdll/unix/loader.c` dlopens `compatdb.so` and exports
-  `prepend_dll_path` and `add_load_order_override` for it.
+  `prepend_dll_path`, `add_load_order_override` and
+  `set_compat_dpi_awareness` for it. The last one only stores the value;
+  `dlls/win32u/sysparams.c` reads it through `ntdll_get_compat_dpi_awareness`
+  when it first sets the process awareness. A `compatdb.so` running on an
+  ntdll without the export logs that and ignores `dpi_aware`.
 - `dlls/ntdll/loader.c` decides no-execute from the main executable alone
   instead of turning it off for the process as soon as any module lacks
   `NX_COMPAT`, and `dlls/ntdll/unix/process.c` keeps it permanently on under

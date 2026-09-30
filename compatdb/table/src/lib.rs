@@ -2,8 +2,8 @@
 //!
 //! A [`Rule`] says which processes it matches and which settings it applies to
 //! them: the Direct3D implementations to load (one for D3D9, one for the DXGI
-//! family), DLL load-order overrides, command-line switches and environment
-//! entries.
+//! family), DLL load-order overrides, the DPI awareness, command-line switches
+//! and environment entries.
 //!
 //! Shared by `compatdb.so`, the unix library wine's ntdll loads into every
 //! process (it holds the built-in rules, parses [`ENV_VAR`], overlays the
@@ -35,7 +35,7 @@ pub const ENV_VAR: &str = "WINE_COMPATDB";
 /// A table carrying a different version is ignored wholesale, which is what
 /// makes a format change safe: a long-lived process started before the change
 /// still holds the old value and simply drops it.
-pub const HEADER: &str = "v=3";
+pub const HEADER: &str = "v=4";
 
 /// The parts of a PE version resource the database can match on. Vendor-set at
 /// link time, so stable across install location and patches. Empty strings when
@@ -240,6 +240,10 @@ pub struct Rule {
     pub dxgi: Option<Dxgi>,
     /// The D3D9 implementation to load.
     pub d3d9: Option<D3d9>,
+    /// Whether the process is DPI-aware (system-aware) or unaware. Unset
+    /// leaves the decision to a less specific rule, and with none to wine
+    /// (the registry and the manifest).
+    pub dpi_aware: Option<bool>,
     /// `WINEDLLOVERRIDES` elements (each a `names=order` string).
     pub dll_overrides: Vec<String>,
     /// Text appended to the command line, unless already present.
@@ -265,6 +269,7 @@ impl Default for Rule {
             original_filename: None,
             dxgi: None,
             d3d9: None,
+            dpi_aware: None,
             dll_overrides: Vec::new(),
             arguments: Vec::new(),
             env: Vec::new(),
@@ -345,6 +350,9 @@ impl Rule {
         if over.d3d9.is_some() {
             self.d3d9 = over.d3d9;
         }
+        if over.dpi_aware.is_some() {
+            self.dpi_aware = over.dpi_aware;
+        }
         if !over.exe.is_empty() {
             self.exe = over.exe;
         }
@@ -371,6 +379,7 @@ pub struct Table {
 pub struct Resolution {
     pub dxgi: Option<Dxgi>,
     pub d3d9: Option<D3d9>,
+    pub dpi_aware: Option<bool>,
     pub dll_overrides: Vec<String>,
     pub arguments: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -384,6 +393,7 @@ impl Resolution {
     pub const fn is_empty(&self) -> bool {
         self.dxgi.is_none()
             && self.d3d9.is_none()
+            && self.dpi_aware.is_none()
             && self.dll_overrides.is_empty()
             && self.arguments.is_empty()
             && self.env.is_empty()
@@ -400,6 +410,11 @@ impl Table {
     /// So a scalar field ends up holding the most specific rule's value and a
     /// rule naming a process always beats a launch-wide default, while the
     /// lists accumulate across every rule that matched.
+    ///
+    /// The sort has to stay stable: rules of equal specificity fold in table
+    /// order, which is what lets a launcher's `*` rule, appended after the
+    /// built-in `*` rules, win a scalar over them and add its list entries
+    /// after theirs.
     ///
     /// A rule whose executable matches but whose fingerprint does not simply
     /// does not apply; nothing falls back to it, and the rules that do match
@@ -419,6 +434,9 @@ impl Table {
             }
             if let Some(d3d9) = rule.d3d9 {
                 r.d3d9 = Some(d3d9);
+            }
+            if let Some(aware) = rule.dpi_aware {
+                r.dpi_aware = Some(aware);
             }
             r.dll_overrides.extend(rule.dll_overrides.iter().cloned());
             r.arguments.extend(rule.arguments.iter().cloned());
@@ -467,10 +485,17 @@ impl Table {
 
     /// Every pair of rules that matches exactly the same processes, by name.
     /// A duplicate can only be a mistake, so the launcher warns about it.
+    ///
+    /// Plain wildcard rules (`exe = *` with no fingerprint) are left out: they
+    /// are defaults that are meant to stack, one per setting, so several of
+    /// them matching every process is not a mistake.
     #[must_use]
     pub fn duplicate_matchers(&self) -> Vec<(String, String)> {
         let mut pairs = Vec::new();
         for (i, rule) in self.rules.iter().enumerate() {
+            if rule.specificity() == 0 {
+                continue;
+            }
             for other in self.rules.iter().skip(i.saturating_add(1)) {
                 if rule.matches_the_same_as(other) {
                     pairs.push((rule.name.clone(), other.name.clone()));
@@ -632,6 +657,9 @@ fn rule_to_record(rule: &Rule) -> String {
     if let Some(d3d9) = rule.d3d9 {
         fields.push(field("d3d9", d3d9.as_str()));
     }
+    if let Some(aware) = rule.dpi_aware {
+        fields.push(field("dpi_aware", if aware { "true" } else { "false" }));
+    }
     for over in &rule.dll_overrides {
         fields.push(field("dll_overrides", over));
     }
@@ -676,6 +704,14 @@ fn record_to_rule(record: &str) -> Result<Rule, String> {
                 match D3d9::parse(&decoded) {
                     Some(d3d9) => rule.d3d9 = Some(d3d9),
                     None => return Err(format!("unknown d3d9 value {decoded:?}")),
+                }
+            }
+            "dpi_aware" => {
+                let decoded = decode(value);
+                match decoded.as_str() {
+                    "true" => rule.dpi_aware = Some(true),
+                    "false" => rule.dpi_aware = Some(false),
+                    _ => return Err(format!("unknown dpi_aware value {decoded:?}")),
                 }
             }
             "dll_overrides" => rule.dll_overrides.push(decode(value)),
@@ -926,8 +962,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_the_previous_header() {
+        // A process started before the format change still holds a `v=3`
+        // value; it must be dropped whole rather than half understood.
+        let (table, diagnostics) = Table::parse("v=3\nname=x;exe=x.exe");
+        assert!(table.rules.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        let (table, diagnostics) = Table::parse("v=4\nname=x;exe=x.exe");
+        assert_eq!(table.rules.len(), 1);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
     fn parse_skips_a_record_without_a_name_but_keeps_the_rest() {
-        let (table, diagnostics) = Table::parse("v=3\nexe=no-name.exe\nname=ok;exe=ok.exe");
+        let (table, diagnostics) =
+            Table::parse(&format!("{HEADER}\nexe=no-name.exe\nname=ok;exe=ok.exe"));
         assert_eq!(table.rules.len(), 1);
         assert_eq!(table.rules.first().map(|r| r.exe.as_str()), Some("ok.exe"));
         assert_eq!(diagnostics.len(), 1);
@@ -937,7 +986,8 @@ mod tests {
     fn an_override_carrying_only_the_changed_fields_needs_no_exe() {
         // What a game file writes to extend a built-in rule: the name it is
         // addressing plus the one field it changes.
-        let (over, diagnostics) = Table::parse("v=3\nname=rockstar-launcher;dxgi=dxmt");
+        let (over, diagnostics) =
+            Table::parse(&format!("{HEADER}\nname=rockstar-launcher;dxgi=dxmt"));
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(over.rules.len(), 1);
         assert!(over.rules.first().map(|r| r.exe.is_empty()).unwrap());
@@ -961,12 +1011,157 @@ mod tests {
 
     #[test]
     fn parse_rejects_unknown_keys_and_implementation_values() {
-        let (_, d1) = Table::parse("v=3\nname=x;exe=x.exe;bogus=1");
+        let (_, d1) = Table::parse(&format!("{HEADER}\nname=x;exe=x.exe;bogus=1"));
         assert_eq!(d1.len(), 1);
-        let (_, d2) = Table::parse("v=3\nname=x;exe=x.exe;dxgi=vulkan");
+        let (_, d2) = Table::parse(&format!("{HEADER}\nname=x;exe=x.exe;dxgi=vulkan"));
         assert_eq!(d2.len(), 1);
-        let (_, d3) = Table::parse("v=3\nname=x;exe=x.exe;d3d9=gptk");
+        let (_, d3) = Table::parse(&format!("{HEADER}\nname=x;exe=x.exe;d3d9=gptk"));
         assert_eq!(d3.len(), 1);
+    }
+
+    #[test]
+    fn dpi_aware_round_trips_in_both_values_and_is_absent_when_unset() {
+        let table = Table {
+            rules: vec![
+                Rule {
+                    name: "aware".into(),
+                    exe: ANY_EXE.into(),
+                    dpi_aware: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "unaware".into(),
+                    exe: "old.exe".into(),
+                    d3d9: Some(D3d9::Wined3d),
+                    dpi_aware: Some(false),
+                    dll_overrides: vec!["a=".into()],
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "unset".into(),
+                    exe: "other.exe".into(),
+                    ..Rule::default()
+                },
+            ],
+        };
+        let text = table.to_env_value();
+        assert_eq!(
+            text,
+            format!(
+                "{HEADER}\n\
+                 name=aware;exe=*;dpi_aware=true\n\
+                 name=unaware;exe=old.exe;d3d9=wined3d;dpi_aware=false;dll_overrides=a=\n\
+                 name=unset;exe=other.exe"
+            )
+        );
+        let (parsed, diagnostics) = Table::parse(&text);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(parsed, table);
+    }
+
+    #[test]
+    fn a_bad_dpi_aware_value_drops_the_record() {
+        for bad in ["yes", "1", "TRUE", ""] {
+            let (table, diagnostics) = Table::parse(&format!(
+                "{HEADER}\nname=x;exe=x.exe;dpi_aware={bad}\nname=ok;exe=ok.exe"
+            ));
+            assert_eq!(table.rules.len(), 1, "dpi_aware={bad:?}");
+            assert_eq!(table.rules.first().map(|r| r.name.as_str()), Some("ok"));
+            assert_eq!(diagnostics.len(), 1, "dpi_aware={bad:?}");
+        }
+    }
+
+    #[test]
+    fn dpi_aware_resolves_to_the_most_specific_rule_and_unset_inherits() {
+        let table = Table {
+            rules: vec![
+                Rule {
+                    name: "pinned".into(),
+                    exe: "game.exe".into(),
+                    company: Some("Acme".into()),
+                    dpi_aware: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "named".into(),
+                    exe: "game.exe".into(),
+                    dpi_aware: Some(false),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "defaults".into(),
+                    exe: ANY_EXE.into(),
+                    dpi_aware: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "quiet".into(),
+                    exe: "quiet.exe".into(),
+                    arguments: vec!["-x".into()],
+                    ..Rule::default()
+                },
+            ],
+        };
+        let acme = VersionInfo {
+            company: "Acme".into(),
+            ..VersionInfo::default()
+        };
+        // Only the wildcard matches.
+        let other = table.resolve("other.exe", &VersionInfo::default());
+        assert_eq!(other.dpi_aware, Some(true));
+        assert!(!other.is_empty());
+        // The basename rule beats the wildcard.
+        assert_eq!(
+            table.resolve("game.exe", &VersionInfo::default()).dpi_aware,
+            Some(false)
+        );
+        // The fingerprinted rule beats both.
+        let pinned = table.resolve("game.exe", &acme);
+        assert_eq!(pinned.dpi_aware, Some(true));
+        assert_eq!(
+            pinned.matched,
+            vec![
+                "defaults".to_string(),
+                "named".to_string(),
+                "pinned".to_string()
+            ]
+        );
+        // A more specific rule that leaves it unset inherits the wildcard's.
+        let quiet = table.resolve("quiet.exe", &VersionInfo::default());
+        assert_eq!(quiet.dpi_aware, Some(true));
+        assert_eq!(
+            quiet.matched,
+            vec!["defaults".to_string(), "quiet".to_string()]
+        );
+        // With no rule setting it, the resolution leaves it to wine.
+        assert_eq!(Table::default().resolve("x.exe", &acme).dpi_aware, None);
+    }
+
+    #[test]
+    fn overlay_by_name_replaces_dpi_aware_only_when_set() {
+        let mut base = Table {
+            rules: vec![Rule {
+                name: "defaults".into(),
+                exe: ANY_EXE.into(),
+                dpi_aware: Some(true),
+                ..Rule::default()
+            }],
+        };
+        // An override that does not mention it leaves the value alone.
+        let (over, diagnostics) =
+            Table::parse(&format!("{HEADER}\nname=defaults;dll_overrides=a="));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(base.overlay(over).is_empty());
+        assert_eq!(base.rules.first().unwrap().dpi_aware, Some(true));
+        // One that sets it replaces it.
+        let (over, diagnostics) = Table::parse(&format!("{HEADER}\nname=defaults;dpi_aware=false"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(base.overlay(over).is_empty());
+        assert_eq!(base.rules.first().unwrap().dpi_aware, Some(false));
+        assert_eq!(
+            base.resolve("x.exe", &VersionInfo::default()).dpi_aware,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1418,6 +1613,49 @@ mod tests {
         assert_eq!(
             table.duplicate_matchers(),
             vec![("one".to_string(), "two".to_string())]
+        );
+    }
+
+    #[test]
+    fn wildcard_rules_are_not_duplicates_of_each_other() {
+        // Several `*` rules are defaults that stack. A wildcard that pins a
+        // fingerprint is an ordinary matcher and is still reported.
+        let table = Table {
+            rules: vec![
+                Rule {
+                    name: "no-vulkan".into(),
+                    exe: ANY_EXE.into(),
+                    dll_overrides: vec!["vulkan-1=".into()],
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "dpi-aware".into(),
+                    exe: ANY_EXE.into(),
+                    dpi_aware: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "global".into(),
+                    exe: ANY_EXE.into(),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "acme-one".into(),
+                    exe: ANY_EXE.into(),
+                    company: Some("Acme".into()),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "acme-two".into(),
+                    exe: ANY_EXE.into(),
+                    company: Some("Acme".into()),
+                    ..Rule::default()
+                },
+            ],
+        };
+        assert_eq!(
+            table.duplicate_matchers(),
+            vec![("acme-one".to_string(), "acme-two".to_string())]
         );
     }
 
