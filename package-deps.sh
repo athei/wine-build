@@ -12,9 +12,9 @@ set -e
 #
 # So the tree is built once here, on a machine that already has an Intel
 # Homebrew, and mirrored as a release asset. The libraries come from Homebrew's
-# sonoma bottles, so they carry a minos of 14.0, below the 15.0 that
-# build-wine.sh pins; building them from source on a current macOS would raise
-# that floor instead. Upload the result with:
+# sonoma bottles, so they carry a minos of 14.0, below MACOS_FLOOR; building
+# them from source on a current macOS would raise that floor instead. Upload
+# the result with:
 #
 #   gh release create deps-<date> --title ... dist/wine-deps-macos-x86_64.tar.xz
 #
@@ -22,10 +22,10 @@ set -e
 #
 # gmp is the exception: it is the one formula with no x86_64 bottle at all, so
 # Homebrew compiles it here and stamps it with this machine's macOS version.
-# cx-26.3.0-8 shipped a libgmp with a minos of 26.0 for exactly that reason,
-# which would have failed to load on anything older. It is rebuilt below
-# against MACOS_FLOOR, and every Mach-O in the staged tree is checked against
-# that floor before the archive is written.
+# One packaging run produced a libgmp with a minos of 26.0 for exactly that
+# reason, which would have failed to load on anything older. It is rebuilt
+# below against MACOS_FLOOR, and every Mach-O in the staged tree is checked
+# against that floor before the archive is written.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PREFIX="${PREFIX:-/usr/local}"
@@ -37,7 +37,11 @@ OUT="$OUT_DIR/wine-deps-macos-x86_64.tar.xz"
 # x86_64-adjacent; everything else in the closure comes along automatically.
 ROOTS=(freetype gnutls sdl2-compat sdl3 bison)
 
-# Must match MACOSX_DEPLOYMENT_TARGET in build-wine.sh.
+# Must not be newer than the MACOSX_DEPLOYMENT_TARGET build-wine.sh pins.
+# A lower floor is fine, since libraries built for an older macOS load in a
+# Wine built for a newer one. It stays at 15.0 because the published deps-*
+# release was built against it, and raising it would mean rebuilding and
+# uploading that release for no gain.
 MACOS_FLOOR="${MACOS_FLOOR:-15.0}"
 
 GMP_VERSION="6.3.0"
