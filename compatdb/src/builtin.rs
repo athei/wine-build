@@ -4,15 +4,30 @@
 //! environment. Only overrides are serialized into `WINE_COMPATDB`; the
 //! library overlays them onto these rules by name.
 //!
-//! Every rule carries a version fingerprint, so none of them can catch an
-//! unrelated program that happens to share a file name.
+//! Every rule that names an executable also carries a version fingerprint, so
+//! none of them can catch an unrelated program that happens to share a file
+//! name. The one exception is `no-vulkan`, which matches every process on
+//! purpose.
 
-use compatdb_table::{Dxgi, Rule, Table};
+use compatdb_table::{ANY_EXE, Dxgi, Rule, Table};
 
 /// The rules the bundle ships with.
 pub fn table() -> Table {
     Table {
         rules: vec![
+            // The bundle ships no Vulkan: Wine is built --without-vulkan and
+            // bundle-wine.sh deletes vulkan-1.dll and winevulkan. A Vulkan
+            // loader a game ships next to its exe can therefore only fail, so
+            // disable vulkan-1 in every process: the loader then fails to
+            // load, and a game that has another renderer uses it. A rule for
+            // one game's exe that adds `vulkan-1=n` is folded after this one
+            // and wins.
+            Rule {
+                name: "no-vulkan".into(),
+                exe: ANY_EXE.into(),
+                dll_overrides: vec!["vulkan-1=".into()],
+                ..Rule::default()
+            },
             // The Rockstar Games Launcher needs a real D3D10.1 device, which
             // the 64-bit default (Apple's D3DMetal) does not provide; wined3d
             // does. Matched by its version resource, not its path, so it works
@@ -98,7 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_rule_has_a_unique_name_and_a_fingerprint() {
+    fn every_builtin_rule_has_a_unique_name_and_none_matches_a_bare_basename() {
+        // A rule naming an executable must also pin its version resource, or
+        // it would catch every program of that name. The `*` rule is a
+        // different case: it is meant for every process.
         let table = table();
         for rule in &table.rules {
             assert!(!rule.name.is_empty(), "{} has no name", rule.exe);
@@ -115,6 +133,47 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), count, "duplicate rule name");
         assert!(table.duplicate_matchers().is_empty());
+    }
+
+    #[test]
+    fn every_process_gets_the_vulkan_loader_disabled() {
+        let resolution = table().resolve("game.exe", &VersionInfo::default());
+        assert_eq!(resolution.matched, vec!["no-vulkan".to_string()]);
+        assert_eq!(resolution.dll_overrides, vec!["vulkan-1=".to_string()]);
+    }
+
+    #[test]
+    fn a_game_rule_re_enables_vulkan_after_the_builtin_disables_it() {
+        // ntdll lets the last override for a module win, so the game's entry
+        // has to come after the built-in one. That holds wherever the game's
+        // rule is declared, because the `*` rule is folded first.
+        let mut table = table();
+        let (over, diagnostics) =
+            Table::parse("v=3\nname=my-game;exe=game.exe;dll_overrides=vulkan-1=n");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        let resolution = table.resolve("Game.exe", &VersionInfo::default());
+        assert_eq!(
+            resolution.dll_overrides,
+            vec!["vulkan-1=".to_string(), "vulkan-1=n".to_string()]
+        );
+        // Another process still has it disabled.
+        assert_eq!(
+            table
+                .resolve("other.exe", &VersionInfo::default())
+                .dll_overrides,
+            vec!["vulkan-1=".to_string()]
+        );
+    }
+
+    #[test]
+    fn disabling_no_vulkan_drops_the_override() {
+        let mut table = table();
+        let (over, _) = Table::parse("v=3\nname=no-vulkan;enabled=false");
+        assert!(table.overlay(over).is_empty());
+        let resolution = table.resolve("game.exe", &VersionInfo::default());
+        assert!(resolution.matched.is_empty());
+        assert!(resolution.dll_overrides.is_empty());
     }
 
     #[test]
@@ -145,7 +204,7 @@ mod tests {
         };
         assert_eq!(
             table.resolve("steamwebhelper.exe", &steam).matched,
-            vec!["steam-web-helper".to_string()]
+            vec!["no-vulkan".to_string(), "steam-web-helper".to_string()]
         );
         let social = VersionInfo {
             company: "Take-Two Interactive Software, Inc.".into(),
@@ -154,7 +213,10 @@ mod tests {
         };
         assert_eq!(
             table.resolve("SocialClubHelper.exe", &social).matched,
-            vec!["rockstar-social-club-ui".to_string()]
+            vec![
+                "no-vulkan".to_string(),
+                "rockstar-social-club-ui".to_string()
+            ]
         );
         let gta = VersionInfo {
             company: "Rockstar Games".into(),
@@ -163,20 +225,19 @@ mod tests {
         };
         assert_eq!(
             table.resolve("GTAIV.exe", &gta).matched,
-            vec!["gta-iv".to_string()]
+            vec!["no-vulkan".to_string(), "gta-iv".to_string()]
         );
-        // An unrelated program of the same name is left alone.
-        assert!(
+        // An unrelated program of the same name gets only the `*` rule.
+        let only_wildcard = vec!["no-vulkan".to_string()];
+        assert_eq!(
             table
                 .resolve("steamwebhelper.exe", &VersionInfo::default())
-                .matched
-                .is_empty()
+                .matched,
+            only_wildcard
         );
-        assert!(
-            table
-                .resolve("GTAIV.exe", &VersionInfo::default())
-                .matched
-                .is_empty()
+        assert_eq!(
+            table.resolve("GTAIV.exe", &VersionInfo::default()).matched,
+            only_wildcard
         );
     }
 }

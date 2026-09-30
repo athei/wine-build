@@ -271,12 +271,19 @@ fingerprinted), so a scalar ends up with the most specific rule's value and
 the lists accumulate.
 
 The built-in rules are in
-[`compatdb/src/builtin.rs`](compatdb/src/builtin.rs), each pinned by version
-resource and commented with the reason it exists. They cover launchers that
-need a real D3D10.1 device, which D3DMetal does not provide, embedded
-Chromium (CEF) browsers whose GPU process cannot paint into another process's
-window under winemac, and games that need a command-line switch to work
-around their own detection code.
+[`compatdb/src/builtin.rs`](compatdb/src/builtin.rs), each commented with the
+reason it exists. All but `no-vulkan` are pinned by version resource. They
+cover launchers that need a real D3D10.1 device, which D3DMetal does not
+provide, embedded Chromium (CEF) browsers whose GPU process cannot paint into
+another process's window under winemac, and games that need a command-line
+switch to work around their own detection code.
+
+`no-vulkan` matches every process (`exe` is `*`) and adds the override
+`vulkan-1=`, which disables the Vulkan loader. The bundle has no Vulkan: Wine
+is built `--without-vulkan` and the bundle step deletes the Vulkan modules
+(the list is in [`bundle-wine.sh`](bundle-wine.sh)). A Vulkan loader that a
+game ships next to its executable can therefore only fail. With the override,
+`vulkan-1.dll` fails to load, and a game that has another renderer uses it.
 
 #### WINE_COMPATDB
 
@@ -302,6 +309,21 @@ changes; `enabled=false` drops the rule of that name; a new rule needs an
 `exe`. A header other than the one the library expects makes it ignore the
 whole value with a diagnostic, which is what keeps a format change safe for
 long-lived processes. A malformed line is skipped, never fatal.
+
+To let one game load its own Vulkan loader, give it a rule for its
+executable that adds `vulkan-1=n`:
+
+```
+v=3
+name=my-game;exe=Game.exe;dll_overrides=vulkan-1=n
+```
+
+The `*` rule is folded first, so the game's entry is added after
+`vulkan-1=` and ntdll keeps the last entry for a module. To drop the built-in
+rule for every process instead, use `name=no-vulkan;enabled=false`.
+`WINEDLLOVERRIDES=vulkan-1=n` alone does not re-enable it: ntdll parses that
+variable first, and an override compatdb adds replaces the entry for the same
+module.
 
 The library writes `compatdb:` lines to wine's stderr: one block per process
 with the image name, its version fingerprint, the rules that matched, the
