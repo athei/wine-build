@@ -2,8 +2,8 @@
 //!
 //! A [`Rule`] says which processes it matches and which settings it applies to
 //! them: the Direct3D implementations to load (one for D3D9, one for the DXGI
-//! family), DLL load-order overrides, the DPI awareness, command-line switches
-//! and environment entries.
+//! family), DLL load-order overrides, the DPI awareness, large address
+//! awareness, the x87sidecar, command-line switches and environment entries.
 //!
 //! Shared by `compatdb.so`, the unix library wine's ntdll loads into every
 //! process (it holds the built-in rules, parses [`ENV_VAR`], overlays the
@@ -35,7 +35,7 @@ pub const ENV_VAR: &str = "WINE_COMPATDB";
 /// A table carrying a different version is ignored wholesale, which is what
 /// makes a format change safe: a long-lived process started before the change
 /// still holds the old value and simply drops it.
-pub const HEADER: &str = "v=4";
+pub const HEADER: &str = "v=5";
 
 /// The parts of a PE version resource the database can match on. Vendor-set at
 /// link time, so stable across install location and patches. Empty strings when
@@ -244,6 +244,15 @@ pub struct Rule {
     /// leaves the decision to a less specific rule, and with none to wine
     /// (the registry and the manifest).
     pub dpi_aware: Option<bool>,
+    /// Whether a 32-bit process gets the 4 GB address space whatever its
+    /// executable's `IMAGE_FILE_LARGE_ADDRESS_AWARE` flag says. `false` does
+    /// not take the space away from an executable that has the flag; it only
+    /// stops forcing it. Has no effect on a 64-bit process.
+    pub large_address_aware: Option<bool>,
+    /// Whether an i386 process under Rosetta runs with the x87sidecar
+    /// attached. ntdll asks for this before the process starts, through
+    /// `compatdb_query_x87`, not when the library applies the rest.
+    pub x87_sidecar: Option<bool>,
     /// `WINEDLLOVERRIDES` elements (each a `names=order` string).
     pub dll_overrides: Vec<String>,
     /// Text appended to the command line, unless already present.
@@ -270,6 +279,8 @@ impl Default for Rule {
             dxgi: None,
             d3d9: None,
             dpi_aware: None,
+            large_address_aware: None,
+            x87_sidecar: None,
             dll_overrides: Vec::new(),
             arguments: Vec::new(),
             env: Vec::new(),
@@ -353,6 +364,12 @@ impl Rule {
         if over.dpi_aware.is_some() {
             self.dpi_aware = over.dpi_aware;
         }
+        if over.large_address_aware.is_some() {
+            self.large_address_aware = over.large_address_aware;
+        }
+        if over.x87_sidecar.is_some() {
+            self.x87_sidecar = over.x87_sidecar;
+        }
         if !over.exe.is_empty() {
             self.exe = over.exe;
         }
@@ -380,6 +397,8 @@ pub struct Resolution {
     pub dxgi: Option<Dxgi>,
     pub d3d9: Option<D3d9>,
     pub dpi_aware: Option<bool>,
+    pub large_address_aware: Option<bool>,
+    pub x87_sidecar: Option<bool>,
     pub dll_overrides: Vec<String>,
     pub arguments: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -394,6 +413,8 @@ impl Resolution {
         self.dxgi.is_none()
             && self.d3d9.is_none()
             && self.dpi_aware.is_none()
+            && self.large_address_aware.is_none()
+            && self.x87_sidecar.is_none()
             && self.dll_overrides.is_empty()
             && self.arguments.is_empty()
             && self.env.is_empty()
@@ -437,6 +458,12 @@ impl Table {
             }
             if let Some(aware) = rule.dpi_aware {
                 r.dpi_aware = Some(aware);
+            }
+            if let Some(laa) = rule.large_address_aware {
+                r.large_address_aware = Some(laa);
+            }
+            if let Some(x87) = rule.x87_sidecar {
+                r.x87_sidecar = Some(x87);
             }
             r.dll_overrides.extend(rule.dll_overrides.iter().cloned());
             r.arguments.extend(rule.arguments.iter().cloned());
@@ -657,8 +684,14 @@ fn rule_to_record(rule: &Rule) -> String {
     if let Some(d3d9) = rule.d3d9 {
         fields.push(field("d3d9", d3d9.as_str()));
     }
-    if let Some(aware) = rule.dpi_aware {
-        fields.push(field("dpi_aware", if aware { "true" } else { "false" }));
+    for (key, value) in [
+        ("dpi_aware", rule.dpi_aware),
+        ("large_address_aware", rule.large_address_aware),
+        ("x87_sidecar", rule.x87_sidecar),
+    ] {
+        if let Some(value) = value {
+            fields.push(field(key, if value { "true" } else { "false" }));
+        }
     }
     for over in &rule.dll_overrides {
         fields.push(field("dll_overrides", over));
@@ -706,14 +739,9 @@ fn record_to_rule(record: &str) -> Result<Rule, String> {
                     None => return Err(format!("unknown d3d9 value {decoded:?}")),
                 }
             }
-            "dpi_aware" => {
-                let decoded = decode(value);
-                match decoded.as_str() {
-                    "true" => rule.dpi_aware = Some(true),
-                    "false" => rule.dpi_aware = Some(false),
-                    _ => return Err(format!("unknown dpi_aware value {decoded:?}")),
-                }
-            }
+            "dpi_aware" => rule.dpi_aware = Some(parse_bool(key, value)?),
+            "large_address_aware" => rule.large_address_aware = Some(parse_bool(key, value)?),
+            "x87_sidecar" => rule.x87_sidecar = Some(parse_bool(key, value)?),
             "dll_overrides" => rule.dll_overrides.push(decode(value)),
             "arguments" => rule.arguments.push(decode(value)),
             "env" => {
@@ -730,6 +758,17 @@ fn record_to_rule(record: &str) -> Result<Rule, String> {
     // rule declared elsewhere carries only the fields it changes. A rule that
     // ends up with no exe at all matches nothing, which `overlay` reports.
     Ok(rule)
+}
+
+/// A boolean field's value: exactly `true` or `false`, case-sensitive, so a
+/// typo drops the record instead of quietly meaning one or the other.
+fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
+    let decoded = decode(value);
+    match decoded.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("unknown {key} value {decoded:?}")),
+    }
 }
 
 fn field(key: &str, value: &str) -> String {
@@ -963,12 +1002,12 @@ mod tests {
 
     #[test]
     fn parse_rejects_the_previous_header() {
-        // A process started before the format change still holds a `v=3`
+        // A process started before the format change still holds a `v=4`
         // value; it must be dropped whole rather than half understood.
-        let (table, diagnostics) = Table::parse("v=3\nname=x;exe=x.exe");
+        let (table, diagnostics) = Table::parse("v=4\nname=x;exe=x.exe");
         assert!(table.rules.is_empty());
         assert_eq!(diagnostics.len(), 1);
-        let (table, diagnostics) = Table::parse("v=4\nname=x;exe=x.exe");
+        let (table, diagnostics) = Table::parse("v=5\nname=x;exe=x.exe");
         assert_eq!(table.rules.len(), 1);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
@@ -1162,6 +1201,158 @@ mod tests {
             base.resolve("x.exe", &VersionInfo::default()).dpi_aware,
             Some(false)
         );
+    }
+
+    #[test]
+    fn large_address_aware_and_x87_sidecar_round_trip_and_are_absent_when_unset() {
+        let table = Table {
+            rules: vec![
+                Rule {
+                    name: "defaults".into(),
+                    exe: ANY_EXE.into(),
+                    large_address_aware: Some(true),
+                    x87_sidecar: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "old".into(),
+                    exe: "old.exe".into(),
+                    dpi_aware: Some(false),
+                    large_address_aware: Some(false),
+                    x87_sidecar: Some(false),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "unset".into(),
+                    exe: "other.exe".into(),
+                    ..Rule::default()
+                },
+            ],
+        };
+        let text = table.to_env_value();
+        assert_eq!(
+            text,
+            format!(
+                "{HEADER}\n\
+                 name=defaults;exe=*;large_address_aware=true;x87_sidecar=true\n\
+                 name=old;exe=old.exe;dpi_aware=false;large_address_aware=false;x87_sidecar=false\n\
+                 name=unset;exe=other.exe"
+            )
+        );
+        let (parsed, diagnostics) = Table::parse(&text);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(parsed, table);
+    }
+
+    #[test]
+    fn a_bad_large_address_aware_or_x87_sidecar_value_drops_the_record() {
+        for key in ["large_address_aware", "x87_sidecar"] {
+            for bad in ["yes", "1", "False", ""] {
+                let (table, diagnostics) = Table::parse(&format!(
+                    "{HEADER}\nname=x;exe=x.exe;{key}={bad}\nname=ok;exe=ok.exe"
+                ));
+                assert_eq!(table.rules.len(), 1, "{key}={bad:?}");
+                assert_eq!(table.rules.first().map(|r| r.name.as_str()), Some("ok"));
+                assert_eq!(diagnostics.len(), 1, "{key}={bad:?}");
+                assert!(diagnostics[0].contains(key), "{diagnostics:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn large_address_aware_and_x87_sidecar_resolve_to_the_most_specific_rule() {
+        let table = Table {
+            rules: vec![
+                Rule {
+                    name: "pinned".into(),
+                    exe: "game.exe".into(),
+                    company: Some("Acme".into()),
+                    x87_sidecar: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "named".into(),
+                    exe: "game.exe".into(),
+                    large_address_aware: Some(false),
+                    x87_sidecar: Some(false),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "defaults".into(),
+                    exe: ANY_EXE.into(),
+                    large_address_aware: Some(true),
+                    x87_sidecar: Some(true),
+                    ..Rule::default()
+                },
+            ],
+        };
+        let acme = VersionInfo {
+            company: "Acme".into(),
+            ..VersionInfo::default()
+        };
+        // Only the wildcard matches.
+        let other = table.resolve("other.exe", &VersionInfo::default());
+        assert_eq!(other.large_address_aware, Some(true));
+        assert_eq!(other.x87_sidecar, Some(true));
+        // The basename rule beats the wildcard.
+        let named = table.resolve("game.exe", &VersionInfo::default());
+        assert_eq!(named.large_address_aware, Some(false));
+        assert_eq!(named.x87_sidecar, Some(false));
+        // The fingerprinted rule beats both for the field it sets and inherits
+        // the other from the next most specific rule.
+        let pinned = table.resolve("game.exe", &acme);
+        assert_eq!(pinned.x87_sidecar, Some(true));
+        assert_eq!(pinned.large_address_aware, Some(false));
+        // With no rule setting them, there is no opinion.
+        let none = Table::default().resolve("x.exe", &acme);
+        assert_eq!(none.large_address_aware, None);
+        assert_eq!(none.x87_sidecar, None);
+        assert!(none.is_empty());
+        // Either one alone makes a resolution non-empty.
+        for rule in [
+            Rule {
+                name: "laa".into(),
+                exe: ANY_EXE.into(),
+                large_address_aware: Some(false),
+                ..Rule::default()
+            },
+            Rule {
+                name: "x87".into(),
+                exe: ANY_EXE.into(),
+                x87_sidecar: Some(false),
+                ..Rule::default()
+            },
+        ] {
+            let table = Table { rules: vec![rule] };
+            assert!(!table.resolve("x.exe", &acme).is_empty());
+        }
+    }
+
+    #[test]
+    fn overlay_by_name_replaces_large_address_aware_and_x87_sidecar_only_when_set() {
+        let mut base = Table {
+            rules: vec![Rule {
+                name: "defaults".into(),
+                exe: ANY_EXE.into(),
+                large_address_aware: Some(true),
+                x87_sidecar: Some(true),
+                ..Rule::default()
+            }],
+        };
+        let (over, diagnostics) =
+            Table::parse(&format!("{HEADER}\nname=defaults;dll_overrides=a="));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(base.overlay(over).is_empty());
+        let rule = base.rules.first().unwrap();
+        assert_eq!(rule.large_address_aware, Some(true));
+        assert_eq!(rule.x87_sidecar, Some(true));
+        let (over, diagnostics) =
+            Table::parse(&format!("{HEADER}\nname=defaults;x87_sidecar=false"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(base.overlay(over).is_empty());
+        let rule = base.rules.first().unwrap();
+        assert_eq!(rule.large_address_aware, Some(true));
+        assert_eq!(rule.x87_sidecar, Some(false));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Applying a [`Resolution`] to the current process: prepending the Direct3D
-//! trees, adding load-order overrides, setting the DPI awareness, and rewriting
-//! the command line and environment in both PEB copies.
+//! trees, adding load-order overrides, setting the DPI awareness and large
+//! address awareness, and rewriting the command line and environment in both
+//! PEB copies.
 
 use std::{
     ffi::{CString, OsStr},
@@ -73,6 +74,21 @@ pub fn dpi_awareness(nt: &Ntdll, aware: bool) {
     }
     nt.set_compat_dpi_awareness(i32::from(aware));
     log::line(&format!("  dpi_aware = {aware}"));
+}
+
+/// Tell ntdll whether to force large address awareness. `true` gives a 32-bit
+/// process the 4 GB address space even when its executable lacks the flag;
+/// `false` only stops forcing it, so an executable with the flag keeps it.
+/// ntdll ignores the value for a 64-bit process.
+///
+/// Logs the value only when it was handed over, like [`dpi_awareness`].
+pub fn large_address_aware(nt: &Ntdll, laa: bool) {
+    if !nt.has_set_compat_large_address_aware() {
+        log::line("ntdll lacks set_compat_large_address_aware, ignoring large_address_aware");
+        return;
+    }
+    nt.set_compat_large_address_aware(i32::from(laa));
+    log::line(&format!("  large_address_aware = {laa}"));
 }
 
 /// Rewrite `CommandLine` and `Environment` in the 64-bit params and, for a

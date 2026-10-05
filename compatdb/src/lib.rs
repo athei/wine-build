@@ -1,15 +1,16 @@
 //! `compatdb.so`: the per-process settings library wine's ntdll dlopens from
 //! `<ntdll_dir>/compatdb.so` in every process (the slot `CrossOver` hack 24067
-//! provides), before any PE code runs. Its only entry point is a Mach-O
-//! initializer.
+//! provides), before any PE code runs. Its main entry point is a Mach-O
+//! initializer; ntdll also calls [`compatdb_query_x87`] to decide whether a
+//! process starts under the x87sidecar.
 //!
 //! It holds the built-in rules, overlays the ones passed in
 //! [`ENV_VAR`](compatdb_table::ENV_VAR), resolves the rules that match this
 //! process and applies them: the D3D9 and DXGI trees, DLL load-order
-//! overrides, the DPI awareness, and command-line/environment rewrites. All
-//! the decision logic lives in [`compatdb_table`]; this crate only moves bytes
-//! in and out of the running process, so its `unsafe` is confined to a thin
-//! ntdll shell.
+//! overrides, the DPI awareness, large address awareness, and
+//! command-line/environment rewrites. All the decision logic lives in
+//! [`compatdb_table`]; this crate only moves bytes in and out of the running
+//! process, so its `unsafe` is confined to a thin ntdll shell.
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -25,8 +26,10 @@ mod ntdll;
 mod version;
 
 use std::{
-    ffi::{CStr, CString},
+    ffi::{CStr, CString, OsStr, c_char, c_int},
     fmt::Write as _,
+    os::unix::ffi::OsStrExt as _,
+    path::Path,
 };
 
 use compatdb_table::{Arch, Dxgi, ENV_VAR, Table, VersionInfo, basename_of};
@@ -39,7 +42,98 @@ use crate::ntdll::{Ntdll, Peb, Peb32, ProcessParameters, ProcessParameters32, TE
 static INIT: extern "C" fn() = init;
 
 extern "C" fn init() {
+    // ntdll can load the library before it is initialized itself, only to
+    // call compatdb_query_x87, and says so through compatdb_preinit_query.
+    // Nothing here would work then, so do nothing. dyld does not unload this
+    // library on dlclose, and a later dlopen of it does not run INIT again,
+    // so skipping here would also skip the real run in this process. That is
+    // only correct because ntdll's pre-init path always ends in execv or
+    // fatal_error: the process that runs the program is a fresh image that
+    // loads the library again and runs INIT normally.
+    if ntdll::is_preinit_load() {
+        return;
+    }
     run();
+}
+
+/// Whether the executable at `unix_path` should start under the x87sidecar:
+/// 1 to attach it, 0 not to, -1 for no opinion (a null or empty path, or no
+/// rule that sets `x87_sidecar`).
+///
+/// ntdll calls this before it starts an i386 process, and possibly before
+/// ntdll itself is initialized, so it reads only the rule table and the file:
+/// no PEB, no TEB and no ntdll symbol. It keeps no state between calls. The
+/// path is a unix path when ntdll could resolve one; otherwise it may be a DOS
+/// path, in which case only the basename is known and the version fingerprint
+/// is empty.
+///
+/// # Safety
+/// `unix_path` must be null or point at a NUL-terminated string that stays
+/// valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compatdb_query_x87(unix_path: *const c_char) -> c_int {
+    if unix_path.is_null() {
+        log::line("x87 query without a path, no opinion");
+        return -1;
+    }
+    // SAFETY: the caller passes a NUL-terminated string that stays valid for
+    // the call; it is copied out before anything else happens.
+    let path = unsafe { CStr::from_ptr(unix_path) }.to_bytes().to_vec();
+    let (table, _) = load_table();
+    let Some((exe, version, x87)) = query_x87(&table, &path) else {
+        log::line("x87 query without a file name, no opinion");
+        return -1;
+    };
+    let (answer, ret) = match x87 {
+        Some(true) => ("x87_sidecar (rule) = true", 1),
+        Some(false) => ("x87_sidecar (rule) = false", 0),
+        None => ("x87_sidecar (rule) unset, no opinion", -1),
+    };
+    log::line(&format!(
+        "x87 query {exe}{}: {answer}",
+        fingerprint(&version)
+    ));
+    ret
+}
+
+/// Resolve `x87_sidecar` for the executable at `path`, a unix path or a DOS
+/// one. Returns the basename and version fingerprint it matched on along with
+/// the value, or `None` when the path names no file.
+fn query_x87(table: &Table, path: &[u8]) -> Option<(String, VersionInfo, Option<bool>)> {
+    let path_utf16: Vec<u16> = String::from_utf8_lossy(path).encode_utf16().collect();
+    let exe = basename_of(&path_utf16);
+    if exe.is_empty() {
+        return None;
+    }
+    // ntdll passes an absolute unix path for a file it found. Anything else
+    // is a DOS path or a bare name, which must not be opened relative to the
+    // current directory, so it reads as no version resource, as does a file
+    // that does not exist.
+    let version = if path.starts_with(b"/") {
+        version::read_file(Path::new(OsStr::from_bytes(path)))
+    } else {
+        VersionInfo::default()
+    };
+    let x87 = table.resolve(&exe, &version).x87_sidecar;
+    Some((exe, version, x87))
+}
+
+/// The built-in rules with the overrides from [`ENV_VAR`] laid on top, plus
+/// the lines worth logging about the overrides: parse diagnostics and
+/// overrides that name no rule.
+fn load_table() -> (Table, Vec<String>) {
+    // The built-in rules are compiled in; only overrides travel in the
+    // environment (absent unless something set it). Overlay them.
+    let mut table = builtin::table();
+    let mut messages = Vec::new();
+    if let Some(text) = read_env() {
+        let (overrides, diagnostics) = Table::parse(&text);
+        messages.extend(diagnostics);
+        for name in table.overlay(overrides) {
+            messages.push(format!("override names no rule: {name}"));
+        }
+    }
+    (table, messages)
 }
 
 fn run() {
@@ -52,17 +146,9 @@ fn run() {
         log::line("required ntdll symbols missing, doing nothing");
         return;
     };
-    // The built-in rules are compiled in; only overrides travel in the
-    // environment (absent unless something set it). Overlay them.
-    let mut table = builtin::table();
-    if let Some(text) = read_env() {
-        let (overrides, diagnostics) = Table::parse(&text);
-        for d in &diagnostics {
-            log::line(d);
-        }
-        for name in table.overlay(overrides) {
-            log::line(&format!("override names no rule: {name}"));
-        }
+    let (table, messages) = load_table();
+    for m in &messages {
+        log::line(m);
     }
     let Some(process) = Process::current(&nt) else {
         return;
@@ -112,6 +198,19 @@ fn run() {
     }
     if let Some(aware) = resolution.dpi_aware {
         apply::dpi_awareness(&nt, aware);
+    }
+    if let Some(laa) = resolution.large_address_aware {
+        apply::large_address_aware(&nt, laa);
+    }
+    // Only for the log, and only the rule's value: ntdll asked
+    // compatdb_query_x87 before it started the process and decided then, and
+    // it may have skipped the sidecar regardless (an empty ROSETTA_X87_PATH,
+    // no sidecar installed, an ntdll without the query). For a first launch
+    // by DOS path, ntdll resolves the path through the prefix's dosdevices;
+    // when that fails the query saw only the basename. It means
+    // nothing to a 64-bit process, so only an i386 one shows it.
+    if let (Some(x87), Arch::I386) = (resolution.x87_sidecar, process.arch) {
+        log::line(&format!("  x87_sidecar (rule) = {x87}"));
     }
     if !resolution.arguments.is_empty() {
         log::line(&format!("  arguments = {}", resolution.arguments.join(" ")));
@@ -267,4 +366,73 @@ unsafe fn read_environment(env: *mut u16, size_bytes: usize) -> Vec<u16> {
     let units = size_bytes / 2;
     // SAFETY: the caller guarantees `env` covers `size_bytes` bytes.
     unsafe { std::slice::from_raw_parts(env, units) }.to_vec()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use compatdb_table::{ANY_EXE, Rule};
+
+    use super::*;
+
+    fn table() -> Table {
+        Table {
+            rules: vec![
+                Rule {
+                    name: "defaults".into(),
+                    exe: ANY_EXE.into(),
+                    x87_sidecar: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    name: "no-x87".into(),
+                    exe: "Old.exe".into(),
+                    x87_sidecar: Some(false),
+                    ..Rule::default()
+                },
+            ],
+        }
+    }
+
+    fn x87(table: &Table, path: &str) -> Option<bool> {
+        query_x87(table, path.as_bytes()).unwrap().2
+    }
+
+    #[test]
+    fn the_query_matches_on_the_basename_of_a_unix_or_a_dos_path() {
+        let table = table();
+        assert_eq!(x87(&table, "/nonexistent/games/old.exe"), Some(false));
+        assert_eq!(x87(&table, "C:\\Games\\OLD.EXE"), Some(false));
+        assert_eq!(x87(&table, "old.exe"), Some(false));
+        assert_eq!(x87(&table, "/nonexistent/games/new.exe"), Some(true));
+        let (exe, version, _) = query_x87(&table, b"C:\\Games\\Old.exe").unwrap();
+        assert_eq!(exe, "Old.exe");
+        assert_eq!(version, VersionInfo::default());
+    }
+
+    #[test]
+    fn the_query_has_no_opinion_without_a_file_name_or_a_rule() {
+        let table = table();
+        assert!(query_x87(&table, b"").is_none());
+        assert!(query_x87(&table, b"/nonexistent/games/").is_none());
+        assert!(query_x87(&table, b"C:\\Games\\").is_none());
+        assert_eq!(x87(&Table::default(), "/nonexistent/game.exe"), None);
+        // SAFETY: a null path is part of the contract.
+        assert_eq!(unsafe { compatdb_query_x87(std::ptr::null()) }, -1);
+        let empty = c"";
+        // SAFETY: a valid NUL-terminated string.
+        assert_eq!(unsafe { compatdb_query_x87(empty.as_ptr()) }, -1);
+    }
+
+    #[test]
+    fn the_builtin_default_attaches_the_sidecar() {
+        // The exported function reads WINE_COMPATDB, which a developer's shell
+        // may set; the answer is only predictable without it.
+        if std::env::var_os(ENV_VAR).is_some() {
+            return;
+        }
+        let path = c"/nonexistent/games/game.exe";
+        // SAFETY: a valid NUL-terminated string.
+        assert_eq!(unsafe { compatdb_query_x87(path.as_ptr()) }, 1);
+    }
 }

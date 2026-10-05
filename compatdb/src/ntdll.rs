@@ -187,9 +187,11 @@ type FnAllocateVirtualMemory =
 type FnPrependDllPath = unsafe extern "C" fn(*const c_char);
 type FnAddLoadOrderOverride = unsafe extern "C" fn(*const u16);
 type FnSetCompatDpiAwareness = unsafe extern "C" fn(c_int);
+type FnSetCompatLargeAddressAware = unsafe extern "C" fn(c_int);
+type FnCompatdbPreinitQuery = unsafe extern "C" fn() -> c_int;
 
-/// The resolved ntdll functions. The first three are required; the three hooks
-/// are optional and their features are skipped (with a log line) when absent.
+/// The resolved ntdll functions. The first three are required; the hooks are
+/// optional and their features are skipped (with a log line) when absent.
 pub struct Ntdll {
     current_teb: FnCurrentTeb,
     query_information_process: FnQueryInformationProcess,
@@ -197,6 +199,7 @@ pub struct Ntdll {
     prepend_dll_path: Option<FnPrependDllPath>,
     add_load_order_override: Option<FnAddLoadOrderOverride>,
     set_compat_dpi_awareness: Option<FnSetCompatDpiAwareness>,
+    set_compat_large_address_aware: Option<FnSetCompatLargeAddressAware>,
 }
 
 /// Look one symbol up in the default (global) namespace.
@@ -209,6 +212,24 @@ unsafe fn sym(name: &[u8]) -> *mut c_void {
     // SAFETY: `name` is a NUL-terminated byte string; dlsym returns null when
     // the symbol is absent, which every caller checks.
     unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr().cast::<c_char>()) }
+}
+
+/// Whether ntdll loaded the library only to ask it something before ntdll
+/// itself is initialized, in which case the initializer must do nothing.
+///
+/// ntdll exports `compatdb_preinit_query` for this. An ntdll without the
+/// export (stock `CrossOver`, which loads the same code as `cxcompatdb.so`)
+/// never loads the library early, so a missing symbol means a normal load.
+pub fn is_preinit_load() -> bool {
+    // SAFETY: the symbol, when present, is ntdll's `int
+    // compatdb_preinit_query(void)`, which only reads a static.
+    unsafe {
+        let query = sym(b"compatdb_preinit_query\0");
+        if query.is_null() {
+            return false;
+        }
+        std::mem::transmute::<*mut c_void, FnCompatdbPreinitQuery>(query)() != 0
+    }
 }
 
 impl Ntdll {
@@ -227,6 +248,7 @@ impl Ntdll {
             let prepend = sym(b"prepend_dll_path\0");
             let add_override = sym(b"add_load_order_override\0");
             let set_dpi = sym(b"set_compat_dpi_awareness\0");
+            let set_laa = sym(b"set_compat_large_address_aware\0");
             Some(Self {
                 current_teb: std::mem::transmute::<*mut c_void, FnCurrentTeb>(teb),
                 query_information_process: std::mem::transmute::<
@@ -243,6 +265,9 @@ impl Ntdll {
                 }),
                 set_compat_dpi_awareness: (!set_dpi.is_null())
                     .then(|| std::mem::transmute::<*mut c_void, FnSetCompatDpiAwareness>(set_dpi)),
+                set_compat_large_address_aware: (!set_laa.is_null()).then(|| {
+                    std::mem::transmute::<*mut c_void, FnSetCompatLargeAddressAware>(set_laa)
+                }),
             })
         }
     }
@@ -332,6 +357,20 @@ impl Ntdll {
         if let Some(f) = self.set_compat_dpi_awareness {
             // SAFETY: the hook takes a plain int and only stores it.
             unsafe { f(aware) }
+        }
+    }
+
+    pub const fn has_set_compat_large_address_aware(&self) -> bool {
+        self.set_compat_large_address_aware.is_some()
+    }
+
+    /// Tell ntdll whether to force large address awareness: 1 raises a 32-bit
+    /// process's address limit to 4 GB once the library returns, 0 leaves it
+    /// to the executable's own flag.
+    pub fn set_compat_large_address_aware(&self, value: c_int) {
+        if let Some(f) = self.set_compat_large_address_aware {
+            // SAFETY: the hook takes a plain int and only stores it.
+            unsafe { f(value) }
         }
     }
 }

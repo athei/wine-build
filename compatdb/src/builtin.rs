@@ -6,9 +6,10 @@
 //!
 //! Every rule that names an executable also carries a version fingerprint, so
 //! none of them can catch an unrelated program that happens to share a file
-//! name. The exceptions are `no-vulkan`, `dpi-aware` and `no-mono-gecko`,
-//! which match every process on purpose: each is a default that a more
-//! specific rule can override and that can be dropped by name.
+//! name. The exceptions are `no-vulkan`, `dpi-aware`, `large-address-aware`,
+//! `x87-sidecar` and `no-mono-gecko`, which match every process on purpose:
+//! each is a default that a more specific rule can override and that can be
+//! dropped by name.
 
 use compatdb_table::{ANY_EXE, Dxgi, Rule, Table};
 
@@ -38,6 +39,30 @@ pub fn table() -> Table {
                 name: "dpi-aware".into(),
                 exe: ANY_EXE.into(),
                 dpi_aware: Some(true),
+                ..Rule::default()
+            },
+            // Every 32-bit process gets the 4 GB address space, whether or not
+            // its executable has the large-address-aware flag. Older games
+            // that run out of their 2 GB long before they would on Windows,
+            // because Wine itself and the Direct3D layers take a share, get
+            // the headroom. A rule for one game with `large_address_aware =
+            // false` stops forcing it; an executable that has the flag keeps
+            // it regardless. 64-bit processes are not affected.
+            Rule {
+                name: "large-address-aware".into(),
+                exe: ANY_EXE.into(),
+                large_address_aware: Some(true),
+                ..Rule::default()
+            },
+            // Every i386 process under Rosetta starts with the x87sidecar
+            // attached, which runs x87 floating-point code faster than
+            // Rosetta does on its own. ntdll asks compatdb_query_x87 before it
+            // starts the process, so a rule for one game with `x87_sidecar =
+            // false` keeps the sidecar away from it.
+            Rule {
+                name: "x87-sidecar".into(),
+                exe: ANY_EXE.into(),
+                x87_sidecar: Some(true),
                 ..Rule::default()
             },
             // Keeps Wine from prompting to install Mono and Gecko, in
@@ -125,8 +150,15 @@ mod tests {
         vec![
             "no-vulkan".to_string(),
             "dpi-aware".to_string(),
+            "large-address-aware".to_string(),
+            "x87-sidecar".to_string(),
             "no-mono-gecko".to_string(),
         ]
+    }
+
+    /// `wildcards()` without the rule of the given name.
+    fn wildcards_without(name: &str) -> Vec<String> {
+        wildcards().into_iter().filter(|n| n != name).collect()
     }
 
     /// `wildcards()` followed by one more specific rule.
@@ -189,6 +221,42 @@ mod tests {
             vec!["vulkan-1=".to_string(), "mscoree,mshtml=".to_string()]
         );
         assert_eq!(resolution.dpi_aware, Some(true));
+        assert_eq!(resolution.large_address_aware, Some(true));
+        assert_eq!(resolution.x87_sidecar, Some(true));
+    }
+
+    #[test]
+    fn a_game_rule_turns_large_address_awareness_and_the_x87_sidecar_off() {
+        let mut table = table();
+        let (over, diagnostics) = Table::parse(&format!(
+            "{HEADER}\nname=old;exe=old.exe;large_address_aware=false;x87_sidecar=false"
+        ));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        let old = table.resolve("Old.exe", &VersionInfo::default());
+        assert_eq!(old.large_address_aware, Some(false));
+        assert_eq!(old.x87_sidecar, Some(false));
+        assert_eq!(old.matched, wildcards_and("old"));
+        // Another process keeps both defaults.
+        let other = table.resolve("other.exe", &VersionInfo::default());
+        assert_eq!(other.large_address_aware, Some(true));
+        assert_eq!(other.x87_sidecar, Some(true));
+        // The plain wildcard rules still stack without being reported.
+        assert!(table.duplicate_matchers().is_empty());
+    }
+
+    #[test]
+    fn disabling_the_laa_and_x87_rules_leaves_no_opinion() {
+        let mut table = table();
+        let (over, diagnostics) = Table::parse(&format!(
+            "{HEADER}\nname=large-address-aware;enabled=false\nname=x87-sidecar;enabled=false"
+        ));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(table.overlay(over).is_empty());
+        let resolution = table.resolve("game.exe", &VersionInfo::default());
+        assert_eq!(resolution.large_address_aware, None);
+        assert_eq!(resolution.x87_sidecar, None);
+        assert_eq!(resolution.dpi_aware, Some(true));
     }
 
     #[test]
@@ -199,10 +267,7 @@ mod tests {
         assert!(table.overlay(over).is_empty());
         let resolution = table.resolve("game.exe", &VersionInfo::default());
         assert_eq!(resolution.dpi_aware, None);
-        assert_eq!(
-            resolution.matched,
-            vec!["no-vulkan".to_string(), "no-mono-gecko".to_string()]
-        );
+        assert_eq!(resolution.matched, wildcards_without("dpi-aware"));
     }
 
     #[test]
@@ -312,10 +377,7 @@ mod tests {
         let (over, _) = Table::parse(&format!("{HEADER}\nname=no-vulkan;enabled=false"));
         assert!(table.overlay(over).is_empty());
         let resolution = table.resolve("game.exe", &VersionInfo::default());
-        assert_eq!(
-            resolution.matched,
-            vec!["dpi-aware".to_string(), "no-mono-gecko".to_string()]
-        );
+        assert_eq!(resolution.matched, wildcards_without("no-vulkan"));
         // The Mono and Gecko prompts stay off.
         assert_eq!(
             resolution.dll_overrides,

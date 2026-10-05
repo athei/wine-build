@@ -30,18 +30,28 @@ of its own. Nothing in that tree is runnable.
 
 `bundle-wine.sh` turns the build output into a distributable `wine/` tree:
 staged `make install`, prefix flattened, dylibs copied into `lib/external/`
-with `@loader_path` install names, the Direct3D implementations and
-`compatdb.so` installed, then a verification pass that ends by booting a
-throwaway prefix. `--runtime-only` skips the SDK files and the test binaries;
-that is the flavor that goes into an application.
+with `@loader_path` install names, the Direct3D implementations, the
+x87sidecar and `compatdb.so` installed, then a verification pass that ends by
+booting a throwaway prefix and starting the i386 `cmd.exe` in it. That run
+proves that ntdll started the program under `bin/x87sidecar` (it looks for
+ntdll's launch line) and that the program exited cleanly within a time limit;
+it does not prove that the sidecar's x87 hook took effect. A full bundle whose
+ntdll lacks the `compatdb_preinit_query` export fails the check, since it was
+built from a Wine tree without the ntdll side of the x87sidecar.
+`--runtime-only` skips the SDK files and the test binaries; that is the flavor
+that goes into an application.
 
 `--compatdb-only` updates the bundle already at `<dest>/wine` instead of
 building a new one: it builds `compatdb.so`, replaces the installed copy,
 checks the new library for `/usr/local/` references and boots a prefix as a
-full bundle does. There is no prompt, nothing is deleted, `make install` does
-not run, and the Wine build directory is not needed, so it works on an
-unpacked release tarball as well. It keeps whatever flavor the bundle already
-has; `--runtime-only` is accepted next to it and ignored.
+full bundle does. The x87sidecar check is skipped when the bundle's ntdll
+lacks the `compatdb_preinit_query` export, since an ntdll that old does not
+start the bundled sidecar on its own; otherwise it runs as in a full bundle,
+including the check that `bin/x87sidecar` is an arm64 executable. There is no
+prompt, nothing is deleted, `make install` does not run, and the Wine build
+directory is not needed, so it works on an unpacked release tarball as well.
+It keeps whatever flavor the bundle already has; `--runtime-only` is accepted
+next to it and ignored.
 
 The `d3d9_test.exe` binaries land in `lib/wine/tests/{i386,x86_64}-windows/`,
 outside the directories the loader searches, and are plain PEs. Wine's
@@ -210,6 +220,24 @@ the Windows behaviour for a game that really executes its data; any other
 value keeps no-execute permanently on, on every host. A compatdb `env` rule
 sets it per game.
 
+## x87sidecar
+
+Rosetta translates x87 floating-point code slowly, and many older 32-bit
+games are full of it. [x87sidecar](https://github.com/athei/x87sidecar)
+attaches to an i386 process under Rosetta and runs that code faster. The
+bundle ships it as `bin/x87sidecar`, from the release pinned in
+[`redist.env`](redist.env), and ntdll starts every i386 process
+under it unless compatdb.so says otherwise for that executable (the
+`x87_sidecar` setting, see [compatdb.so](#compatdbso)). It attaches in
+cooperative mode, so it needs no entitlements and the bundle stays
+notarizable.
+
+`ROSETTA_X87_PATH` decides which sidecar is used for the whole launch. Unset,
+ntdll uses the bundled `bin/x87sidecar`. Set to a path, it uses that binary
+instead, for example a development build. Set to an empty value, no process
+gets a sidecar, whatever the rules say. ntdll skips a sidecar that is missing
+or not executable, and a 64-bit process never gets one.
+
 ## Direct3D
 
 Every Direct3D implementation lives in its own tree under `lib/wine`, and the
@@ -263,6 +291,23 @@ name and version resource, resolves the rules that match, and applies them:
   win32u applies a rule's value before it looks at the `AppCompatFlags\Layers`
   registry value and the manifest, and the first setting wins, so the rule
   beats both. Unset leaves the decision to them.
+- `large_address_aware`: `true` gives a 32-bit process the 4 GB address
+  space even when its executable lacks the large-address-aware flag. `false`
+  only stops forcing it: the executable's own flag,
+  `WINE_LARGE_ADDRESS_AWARE` and the `AppDefaults` registry value then decide
+  as they would without compatdb, so an executable that has the flag keeps
+  it. It has no effect on a 64-bit process. ntdll applies the value after the
+  library returns.
+- `x87_sidecar`: `false` keeps the [x87sidecar](#x87sidecar) away from the
+  executable, `true` attaches it. It only matters for an i386 process under
+  Rosetta. Unlike the other settings it is not applied when the library loads
+  into the process: ntdll asks for it through `compatdb_query_x87` before it
+  starts the process, so the rules are matched against the executable's file
+  (its basename and the version resource read from disk). For the first
+  process of a launch, ntdll maps a DOS path such as `C:\...` through the
+  prefix's `dosdevices` to a unix path first. When the path cannot be
+  resolved, only the basename is used, and only rules that need no
+  fingerprint can match.
 - `arguments`: text appended to the command line unless already present,
   which leaves a Chromium child that inherited its parent's switches alone.
 - `env`: `NAME=value` entries written into the process's environment block
@@ -277,8 +322,9 @@ the lists accumulate.
 
 The built-in rules are in
 [`compatdb/src/builtin.rs`](compatdb/src/builtin.rs), each commented with the
-reason it exists. Three of them, `no-vulkan`, `dpi-aware` and
-`no-mono-gecko`, match every process (`exe` is `*`) and are described below.
+reason it exists. Five of them, `no-vulkan`, `dpi-aware`,
+`large-address-aware`, `x87-sidecar` and `no-mono-gecko`, match every process
+(`exe` is `*`) and are described below.
 The rest are pinned by version resource. They cover launchers that need a
 real D3D10.1 device, which D3DMetal does not provide, embedded Chromium (CEF)
 browsers whose GPU process cannot paint into another process's window under
@@ -302,6 +348,21 @@ system-aware, because the first context set for a process wins. A rule for
 one executable with `dpi_aware=false` makes that program unaware again, and
 `name=dpi-aware;enabled=false` restores upstream behaviour for every process:
 the registry and the manifest decide.
+
+`large-address-aware` sets `large_address_aware = true`, so every 32-bit
+program gets the 4 GB address space. Wine and the Direct3D layers live in the
+same address space as the game, so an older game runs out of its 2 GB sooner
+than it would on Windows. A rule for one executable with
+`large_address_aware=false` stops forcing it for that program, and
+`name=large-address-aware;enabled=false` stops forcing it for every process.
+
+`x87-sidecar` sets `x87_sidecar = true`, so every i386 process under Rosetta
+starts with the x87sidecar attached. A rule for one executable with
+`x87_sidecar=false` keeps it away from that program. Dropping the rule with
+`name=x87-sidecar;enabled=false` leaves the library without an opinion, and
+ntdll then attaches the sidecar anyway; to keep it away from every process,
+add a `*` rule with `x87_sidecar=false` or set `ROSETTA_X87_PATH` to an empty
+value.
 
 `no-mono-gecko` adds the override `mscoree,mshtml=`, which keeps Wine from
 prompting to install Mono and Gecko, in wineboot and in any process that
@@ -328,18 +389,20 @@ Whatever starts the process tree can add or change rules through the
 followed by one rule per line; each rule is `key=value` fields joined by `;`:
 
 ```
-v=4
+v=5
 name=my-game;exe=Game.exe;company=Some Vendor;d3d9=wined3d;dpi_aware=false;env=MTLD3D_CONFIG=adapter.spoof=amd
+name=old-game;exe=OldGame.exe;large_address_aware=false;x87_sidecar=false
 name=rockstar-launcher;dxgi=dxmt
 name=steam-web-helper;enabled=false
 ```
 
 Keys: `name` (required), `exe`, `company`, `product`, `original_filename`,
-`dxgi`, `d3d9`, `dpi_aware` (`true` or `false`), `dll_overrides`,
-`arguments`, `env` (repeatable, value `NAME=value`) and `enabled`. A value
-the library does not know for `dxgi`, `d3d9` or `dpi_aware` drops that rule
-with a diagnostic; `dpi_aware` takes exactly `true` or `false`, so `TRUE` or
-`1` is such a value. Inside a value, `%`, `;`, CR, LF and other control
+`dxgi`, `d3d9`, `dpi_aware`, `large_address_aware`, `x87_sidecar` (the last
+three `true` or `false`), `dll_overrides`, `arguments`, `env` (repeatable,
+value `NAME=value`) and `enabled`. A value the library does not know for
+`dxgi`, `d3d9` or one of the three boolean keys drops that rule with a
+diagnostic; the boolean keys take exactly `true` or `false`, so `TRUE` or `1`
+is such a value. Inside a value, `%`, `;`, CR, LF and other control
 characters are percent-encoded (`%3B` for `;`); everything else, including
 `=`, passes through. A rule naming a built-in rule is merged into it (a set
 scalar wins, lists append), so an override needs only the fields it changes;
@@ -348,15 +411,15 @@ malformed line is skipped, never fatal.
 
 A header other than the one the library expects makes it ignore the whole
 value with a diagnostic, which is what keeps a format change safe for
-long-lived processes. It also means a `v=4` library drops the whole table of
-a launcher that still sends `v=3`, so the launcher and `compatdb.so` have to
-be updated together.
+long-lived processes. It also means a library drops the whole table of a
+launcher that still sends the previous header, so the launcher and
+`compatdb.so` have to be updated together.
 
 To let one game load its own Vulkan loader, give it a rule for its
 executable that adds `vulkan-1=n`:
 
 ```
-v=4
+v=5
 name=my-game;exe=Game.exe;dll_overrides=vulkan-1=n
 ```
 
@@ -378,9 +441,19 @@ modules in every process, which hands the decision back to the registry.
 
 The library writes `compatdb:` lines to wine's stderr: one block per process
 with the image name, its version fingerprint, the rules that matched, the
-trees it prepended, the overrides it added, the DPI awareness it set, and any
-parse diagnostics. To confirm a tree took effect, look at the running
-process's mapped files (`lsof -p <pid> | grep -i dxgi.dll`): a path under
+trees it prepended, the overrides it added, the DPI awareness and large
+address awareness it set, the `x87_sidecar (rule)` value for an i386 process,
+and any parse diagnostics. Each `compatdb_query_x87` call adds one `x87 query`
+line with the executable, its fingerprint and the `x87_sidecar (rule)` value
+it answered with; it comes from the process that is starting the new one, so
+it appears before that process's own block. Both show only what the rules say:
+ntdll still skips the sidecar when `ROSETTA_X87_PATH` is empty, when there is
+no executable sidecar, for a 64-bit process, or when it lacks the query. A
+first launch by a DOS path that ntdll cannot resolve to a unix path is
+matched by basename alone.
+ntdll's own `attaching rosettax87` log line is what shows that the sidecar was
+started. To confirm a tree took effect, look at the running process's mapped
+files (`lsof -p <pid> | grep -i dxgi.dll`): a path under
 `lib/wine/dxgi/<impl>/` or `lib/wine/d3d9/<impl>/` proves it.
 
 ### Where the files come from
@@ -399,16 +472,19 @@ remove quarantine stops the bundle step. Downloading the finished distribution
 can apply quarantine again; this step only removes metadata inherited from
 the build inputs.
 
-DXMT and mtld3d come from their GitHub releases. Apple's Game Porting Toolkit
-download needs an Apple ID session, so the unmodified dmg is attached to a
-`gptk-<version>` release on this repository (those tags trigger neither
-release workflow) and the pin points there; upgrading means downloading the
-new image by hand and creating a new `gptk-*` release. Apple's license
-(shipped as `lib/external/D3DMetal-License.rtf`) allows distributing the
-Redistributables unmodified for non-commercial purposes, which is why the
-files are copied byte for byte: no `install_name_tool`, no re-signing, and the
-dylib closure walk never touches them, which is why the Direct3D step runs
-after the dylib step.
+DXMT, mtld3d and x87sidecar come from their GitHub releases. The x87sidecar
+archive holds only the ad-hoc signed binary, so its MIT license is pinned
+separately, from the same tag of its source repository, and shipped as
+`lib/external/x87sidecar-LICENSE`. The binary is installed as it comes, with
+its signature. Apple's Game Porting Toolkit download needs an Apple ID
+session, so the unmodified dmg is attached to a `gptk-<version>` release on
+this repository (those tags trigger neither release workflow) and the pin
+points there; upgrading means downloading the new image by hand and creating a
+new `gptk-*` release. Apple's license (shipped as
+`lib/external/D3DMetal-License.rtf`) allows distributing the Redistributables
+unmodified for non-commercial purposes, which is why the files are copied byte
+for byte: no `install_name_tool`, no re-signing, and the dylib closure walk
+never touches them, which is why the Direct3D step runs after the dylib step.
 
 ### What the Wine side provides
 
@@ -431,6 +507,18 @@ The patched tree at athei/wine carries the glue:
   `dlls/win32u/sysparams.c` reads it through `ntdll_get_compat_dpi_awareness`
   when it first sets the process awareness. A `compatdb.so` running on an
   ntdll without the export logs that and ignores `dpi_aware`.
+- `dlls/ntdll/unix/loader.c` also exports `set_compat_large_address_aware`,
+  which compatdb.so calls with the `large_address_aware` value; ntdll raises a
+  32-bit process's address limit after the library returns. Without the
+  export the library logs that and ignores the setting.
+- `dlls/ntdll/unix/loader.c` and `dlls/ntdll/unix/process.c` start i386
+  processes under the [x87sidecar](#x87sidecar) and ask compatdb.so's
+  `compatdb_query_x87` export first, in the parent before it starts a child,
+  and in the first process of a launch before ntdll is initialized. For that
+  early call ntdll loads the library by itself and exports
+  `compatdb_preinit_query`, which tells the library's initializer to do
+  nothing. CrossOver's own ntdll lacks the export, so the initializer runs as
+  usual there.
 - `dlls/ntdll/loader.c` decides no-execute from the main executable alone
   instead of turning it off for the process as soon as any module lacks
   `NX_COMPAT`, and `dlls/ntdll/unix/process.c` keeps it permanently on under

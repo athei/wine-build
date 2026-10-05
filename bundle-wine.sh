@@ -55,17 +55,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# fetch <url> <sha256>: download an artifact into $CACHE_DIR, or reuse the
-# cached copy when its checksum still matches the pin. Prints the local path.
+# fetch <url> <sha256> [name]: download an artifact into $CACHE_DIR, or reuse
+# the cached copy when its checksum still matches the pin. Prints the local
+# path. The cached file is named after the URL's last component unless <name>
+# is given, which is for URLs that end in a generic name such as LICENSE.
 # A cached copy that no longer matches is stale (a bump that kept the file
 # name, as mtld3d.tar.xz does) and is replaced. A fresh download that does
 # not match is an error, not a retry: either the pin in redist.env is wrong
 # or the download is, and both need a human. Downloads land in a .part file
 # first, so an interrupted run never leaves a plausible-looking file behind.
 fetch() {
-    local url="$1" want="$2"
-    local name target got
-    name=$(basename "$url")
+    local url="$1" want="$2" name="${3:-}"
+    local target got
+    [ -n "$name" ] || name=$(basename "$url")
     target="$CACHE_DIR/$name"
     if [ -f "$target" ]; then
         got=$(shasum -a 256 "$target" | cut -d' ' -f1)
@@ -133,9 +135,38 @@ check_no_usr_local() {
     done
 }
 
-# smoke_test: run the bundled wine and check that compatdb.so loads in it.
+# check_query_export: fail unless the installed compatdb.so exports
+# compatdb_query_x87. ntdll reads a missing export as no opinion, which means
+# attaching the x87sidecar to every i386 process, so a stripped or renamed
+# export would otherwise go unnoticed.
+check_query_export() {
+    if ! nm -gU "$unix64/compatdb.so" 2>/dev/null | grep -q '_compatdb_query_x87$'; then
+        echo "Error: x86_64-unix/compatdb.so does not export compatdb_query_x87"
+        exit 1
+    fi
+    echo "  compatdb.so exports compatdb_query_x87."
+}
+
+# check_x87sidecar_binary: fail unless bin/x87sidecar is an executable arm64
+# Mach-O. ntdll checks the sidecar with access(X_OK) and skips it otherwise,
+# and only an arm64 binary can attach to Rosetta, so an x86_64 file or a
+# non-executable one must not pass for a working sidecar.
+check_x87sidecar_binary() {
+    if [ ! -x "$WINE_DIR/bin/x87sidecar" ]; then
+        echo "Error: bin/x87sidecar is missing or not executable"
+        exit 1
+    fi
+    if ! lipo -archs "$WINE_DIR/bin/x87sidecar" 2>/dev/null | grep -qw arm64; then
+        echo "Error: bin/x87sidecar is not an arm64 Mach-O"
+        exit 1
+    fi
+    echo "  bin/x87sidecar is an arm64 executable."
+}
+
+# smoke_test: run the bundled wine and check that compatdb.so loads in it, and
+# that an i386 process starts under the bundled x87sidecar.
 smoke_test() {
-    local version smoke_log want
+    local version smoke_log x87_log want
     version=$("$WINE_DIR/bin/wine" --version) || {
         echo "Error: bundled wine failed to run"
         exit 1
@@ -154,6 +185,56 @@ smoke_test() {
         cat "$smoke_log"
         exit 1
     }
+
+    # An ntdll from before the per-executable x87sidecar decision lacks this
+    # export and only starts the sidecar named by ROSETTA_X87_PATH, so there is
+    # nothing to check. --compatdb-only meets that on an older release and
+    # skips the check. A full bundle without the export was built from a Wine
+    # tree that lacks the ntdll commits, which is an error.
+    x87_log=""
+    if nm -gU "$unix64/ntdll.so" 2>/dev/null | grep -q '_compatdb_preinit_query$'; then
+        check_x87sidecar_binary
+        # ntdll maps the DOS path through the prefix's dosdevices and resolves
+        # it to a unix path before it starts the first process, so compatdb.so
+        # can read the file's version resource; when the path cannot be
+        # resolved, only the basename is used. Either way the built-in
+        # x87-sidecar rule says yes. ntdll logs the launch before it execs the
+        # sidecar, and that line is what this looks for. Together with a clean
+        # exit, that proves ntdll started bin/x87sidecar and the program ran
+        # to the end under it; it does not prove that the sidecar's x87 hook
+        # took effect. Run in the prefix just booted, while its server is
+        # still up, so it takes about a second; the alarm stops a hung run
+        # after two minutes. The caller's ROSETTA_X87_PATH and WINE_COMPATDB
+        # are dropped so that the bundled sidecar and the built-in rules
+        # decide.
+        echo "  Starting an i386 process to check the x87sidecar..."
+        x87_log="$TMP_DIR/x87.log"
+        local x87_status=0
+        env -u ROSETTA_X87_PATH -u WINE_COMPATDB \
+            WINEPREFIX="$TMP_DIR/prefix" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all,err+module \
+            perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' 120 \
+            "$WINE_DIR/bin/wine" 'C:\windows\syswow64\cmd.exe' /c exit >"$x87_log" 2>&1 \
+            || x87_status=$?
+        if [ "$x87_status" -ne 0 ]; then
+            # 142 is 128 + SIGALRM: the alarm fired.
+            if [ "$x87_status" -eq 142 ]; then
+                echo "Error: the i386 cmd.exe did not exit within 120 seconds"
+            else
+                echo "Error: the i386 cmd.exe failed under the bundled wine (status $x87_status)"
+            fi
+            cat "$x87_log"
+            WINEPREFIX="$TMP_DIR/prefix" "$WINE_DIR/bin/wineserver" -k 2>/dev/null || true
+            exit 1
+        fi
+    elif [ "$COMPATDB_ONLY" -eq 1 ]; then
+        echo "  Skipping the x87sidecar check: this ntdll predates the per-executable decision."
+    else
+        echo "Error: ntdll.so lacks compatdb_preinit_query; the Wine tree is missing"
+        echo "the ntdll commits for the x87sidecar"
+        WINEPREFIX="$TMP_DIR/prefix" "$WINE_DIR/bin/wineserver" -k 2>/dev/null || true
+        exit 1
+    fi
+
     # The server is persistent, so it has to be told to go rather than waited for.
     WINEPREFIX="$TMP_DIR/prefix" "$WINE_DIR/bin/wineserver" -k 2>/dev/null || true
     for want in "dxgi = gptk (from" "d3d9 = mtld3d (from"; do
@@ -164,6 +245,17 @@ smoke_test() {
         fi
     done
     echo "  compatdb.so loads and finds its trees."
+
+    if [ -n "$x87_log" ]; then
+        # "x87sidecar:" rather than "ROSETTA_X87_PATH:" is how ntdll says the
+        # sidecar is the one in bin/.
+        if ! grep -q "x87sidecar: attaching rosettax87 --cooperative" "$x87_log"; then
+            echo "Error: ntdll did not start the i386 cmd.exe under bin/x87sidecar"
+            cat "$x87_log"
+            exit 1
+        fi
+        echo "  i386 processes start under bin/x87sidecar."
+    fi
 }
 
 # ── compatdb-only: replace compatdb.so in an existing bundle ────────────
@@ -181,7 +273,7 @@ if [ "$COMPATDB_ONLY" -eq 1 ]; then
     echo "==> Step 1: Build compatdb.so"
     build_compatdb
 
-    # Same reason as Step 4c of a full bundle. A freshly linked file normally
+    # Same reason as Step 4d of a full bundle. A freshly linked file normally
     # carries no quarantine, so only remove it when it is there.
     echo "==> Step 2: Remove inherited quarantine"
     if xattr -p com.apple.quarantine "$unix64/compatdb.so" >/dev/null 2>&1; then
@@ -200,6 +292,7 @@ if [ "$COMPATDB_ONLY" -eq 1 ]; then
         echo "Error: compatdb.so is not self-contained"
         exit 1
     fi
+    check_query_export
     smoke_test
 
     echo ""
@@ -367,12 +460,16 @@ done
 # re-signs, or walks the otool closure.
 echo "==> Step 4: Direct3D backends"
 
-# All three are downloaded (or taken from the cache) before anything is
-# installed, so a bad pin fails the run before the tree is half-modified.
+# Every artifact, the x87sidecar of Step 4c included, is downloaded (or taken
+# from the cache) before anything is installed, so a bad pin fails the run
+# before the tree is half-modified.
 echo "  Fetching artifacts into $CACHE_DIR..."
 GPTK_DMG=$(fetch "$GPTK_URL" "$GPTK_SHA256")
 DXMT_TAR=$(fetch "$DXMT_URL" "$DXMT_SHA256")
 MTLD3D_TAR=$(fetch "$MTLD3D_URL" "$MTLD3D_SHA256")
+X87SIDECAR_TAR=$(fetch "$X87SIDECAR_URL" "$X87SIDECAR_SHA256")
+X87SIDECAR_LICENSE=$(fetch "$X87SIDECAR_LICENSE_URL" "$X87SIDECAR_LICENSE_SHA256" \
+    x87sidecar-LICENSE)
 
 # Wine's own D3D12 (vkd3d) and Vulkan modules cannot work in a build configured
 # --without-vulkan, and x86_64 D3D12 is D3DMetal's below. Drop them rather than
@@ -609,13 +706,31 @@ done
 echo "==> Step 4b: Compat database"
 build_compatdb
 
-# ── Step 4c: Remove inherited quarantine ──────────────────────────────
+# ── Step 4c: x87sidecar ─────────────────────────────────────────────────
+# ntdll starts i386 processes under bin/x87sidecar when it exists and
+# compatdb.so does not keep it away from the executable. ROSETTA_X87_PATH
+# overrides the path, and an empty value turns the sidecar off. The binary is
+# an ad-hoc signed arm64 executable and is copied as is: no install_name_tool,
+# no re-signing, and the /usr/local check in Step 5 does not look at bin/.
+echo "==> Step 4c: x87sidecar"
+mkdir -p "$TMP_DIR/x87sidecar"
+tar xJf "$X87SIDECAR_TAR" -C "$TMP_DIR/x87sidecar"
+if [ ! -f "$TMP_DIR/x87sidecar/x87sidecar" ]; then
+    echo "Error: $(basename "$X87SIDECAR_TAR") has no x87sidecar at its top level"
+    exit 1
+fi
+echo "    bin/x87sidecar"
+install -m 0755 "$TMP_DIR/x87sidecar/x87sidecar" "$WINE_DIR/bin/x87sidecar"
+echo "    x87sidecar-LICENSE"
+cp "$X87SIDECAR_LICENSE" "$EXT_DIR/x87sidecar-LICENSE"
+
+# ── Step 4d: Remove inherited quarantine ──────────────────────────────
 # Extracting and copying the checksum-verified redistributables can preserve
 # download quarantine, which blocks libraries such as winemetal.so at load time.
 # Clear only that attribute from the assembled bundle before running it. Keep
 # signatures and other metadata intact; -s acts on symlinks themselves so this
 # cannot change a target outside the bundle.
-echo "==> Step 4c: Remove inherited quarantine"
+echo "==> Step 4d: Remove inherited quarantine"
 if ! xattr -drs com.apple.quarantine "$WINE_DIR"; then
     echo "Error: failed to remove inherited quarantine from $WINE_DIR" >&2
     exit 1
@@ -669,7 +784,9 @@ for want in \
     "lib/wine/x86_64-windows/dxgi.dll" \
     "lib/wine/i386-windows/dxgi.dll" \
     "lib/wine/x86_64-windows/d3d9.dll" \
-    "lib/wine/i386-windows/d3d9.dll"
+    "lib/wine/i386-windows/d3d9.dll" \
+    "bin/x87sidecar" \
+    "lib/external/x87sidecar-LICENSE"
 do
     # -e follows symlinks, so this also proves the GPTK .so links resolve.
     if [ ! -e "$WINE_DIR/$want" ]; then
@@ -686,10 +803,13 @@ for arch in i386-windows x86_64-windows; do
     fi
 done
 if [ $MISSING -ne 0 ]; then
-    echo "Error: Direct3D backends are not installed correctly"
+    echo "Error: Direct3D backends or x87sidecar are not installed correctly"
     exit 1
 fi
-echo "  D3DMetal, DXMT, mtld3d, wined3d and compatdb.so in place."
+echo "  D3DMetal, DXMT, mtld3d, wined3d, compatdb.so and x87sidecar in place."
+check_query_export
+# smoke_test checks that bin/x87sidecar is an arm64 executable before it
+# starts the i386 process, for this mode and --compatdb-only alike.
 
 smoke_test
 
