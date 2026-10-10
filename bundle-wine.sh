@@ -559,11 +559,11 @@ cp "$DXMT_SRC"/i386-windows/*.dll "$WINE_DIR/lib/wine/i386-windows/"
 cp "$DXMT_SRC"/x86_64-unix/winemetal.so "$WINE_DIR/lib/wine/x86_64-unix/"
 
 # mtld3d's tarball mirrors the lib/wine layout under wine/, but the files are
-# named explicitly rather than copied wholesale: wine/<arch>-windows also
-# carries mtld3d.fake.dll, the prefix marker for installs into an existing
-# prefix, and aarch64-unix/ is for an arm64 Wine, which this is not. The
-# prefixes this bundle creates get their markers from wine.inf's wildcard over
-# the default dirs (stamped below).
+# named explicitly rather than copied wholesale: wine/aarch64-unix/ is for an
+# arm64 Wine, which this is not. The tarball's prefix-markers/ holds the
+# system32 and syswow64 placeholders for installs into an existing prefix and
+# is not used either: the prefixes this bundle creates get their markers from
+# wine.inf's wildcard over the default dirs (stamped below).
 echo "  Unpacking mtld3d..."
 mkdir -p "$TMP_DIR/mtld3d"
 tar xf "$MTLD3D_TAR" -C "$TMP_DIR/mtld3d"
