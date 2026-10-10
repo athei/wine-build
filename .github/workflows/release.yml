@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Checkout build scripts
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           path: scripts
 
@@ -29,7 +29,7 @@ jobs:
         run: echo "ref=$(tr -d '[:space:]' < scripts/wine-src.ref)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Wine source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: athei/wine
           ref: ${{ steps.ref.outputs.ref }}
@@ -89,7 +89,7 @@ jobs:
       # The Direct3D redistributables bundle-wine.sh downloads. Keyed on the
       # pin file, so a version bump is the only thing that invalidates it.
       - name: Cache redistributables
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: cache
           key: redist-${{ hashFiles('scripts/redist.env') }}
