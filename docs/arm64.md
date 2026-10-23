@@ -100,6 +100,14 @@ The flags are in the [README](../README.md#commands).
   directory, so the script builds. DXMT is also built whenever the Wine
   source has uncommitted changes.
 - `--print-key` makes each of the four scripts print that key and exit.
+- `WINE_BUILD_CCACHE`, the absolute path of a ccache, runs the compilers of
+  Wine (unix and PE), Mesa and FEX through it; unset, nothing goes through
+  ccache. Setting or unsetting it takes effect on the next run, without
+  `--clean`, and changes neither Wine's configure results nor what is
+  built. How each build takes it, and the ccache settings the scripts set,
+  are in [`profile.sh`](../bin/lib/profile.sh). DXMT and vkd3d-proton name
+  their PE compilers in their own cross files and are not built through
+  it.
 
 ## Paths
 

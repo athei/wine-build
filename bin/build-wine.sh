@@ -48,6 +48,19 @@ if [ "$CLEAN" -eq 1 ]; then
 fi
 claim_tree "$BUILD_DIR" wine "$CLEAN"
 
+# With WINE_BUILD_CCACHE, Wine's configure and make run with a directory of
+# ccache links ahead of PATH (ccache_bin_dir in profile.sh): clang, which CC
+# names, and the llvm-mingw compilers configure looks for first. The build
+# scripts called below get the PATH without it: DXMT's and vkd3d-proton's
+# cross files must find llvm-mingw's own compilers, and FEX and Mesa take
+# ccache their own way.
+WINE_PATH="$PATH"
+if [ -n "$WINE_CCACHE" ]; then
+    ccache_bin_dir "$BUILD_DIR/ccache-bin" clang aarch64-w64-mingw32-clang \
+        arm64ec-w64-mingw32-clang i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc
+    WINE_PATH="$BUILD_DIR/ccache-bin:$PATH"
+fi
+
 # build-fex.sh, build-mesa.sh, build-dxmt.sh and build-vkd3d-proton.sh read
 # the same profile.sh and take --clean the same way.
 SUB_FLAGS=()
@@ -123,7 +136,7 @@ CONFIGURE_ALLOWLIST=(
 cd "$BUILD_DIR"
 if [ "$CLEAN" -eq 1 ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
     echo "==> Configuring Wine..."
-    "$WINE_SRC/configure" \
+    PATH="$WINE_PATH" "$WINE_SRC/configure" \
         --enable-archs="$WINE_ARCHS" \
         "${CONFIGURE_ALLOWLIST[@]}" \
         "${CONFIGURE_TOOLCHAIN[@]}"
@@ -196,13 +209,13 @@ if [ -n "$(unpatched_sonames)" ]; then
 fi
 
 echo "==> Building Wine..."
-make -j$(sysctl -n hw.ncpu)
+PATH="$WINE_PATH" make -j$(sysctl -n hw.ncpu)
 
 if [ -n "$(unpatched_sonames)" ]; then
     echo "==> config.h was regenerated during the build, re-patching and rebuilding..."
     check_soname_defines
     patch_sonames
-    make -j$(sysctl -n hw.ncpu)
+    PATH="$WINE_PATH" make -j$(sysctl -n hw.ncpu)
 fi
 
 # Verify
@@ -277,7 +290,7 @@ if [ "$CLEAN" -eq 1 ] || [ ! -f "$X86LIBS_BUILD_DIR/Makefile" ] \
     || [ "$(cat "$X86LIBS_BUILD_DIR/.configure-key" 2>/dev/null)" != "$X86LIBS_KEY" ]; then
     echo "==> Configuring the x86 link library and test tree $X86LIBS_BUILD_DIR..."
     claim_tree "$X86LIBS_BUILD_DIR" x86libs 1
-    (cd "$X86LIBS_BUILD_DIR" && "$WINE_SRC/configure" "${X86LIBS_CONFIGURE[@]}")
+    (cd "$X86LIBS_BUILD_DIR" && PATH="$WINE_PATH" "$WINE_SRC/configure" "${X86LIBS_CONFIGURE[@]}")
     echo "$X86LIBS_KEY" > "$X86LIBS_BUILD_DIR/.configure-key"
 else
     claim_tree "$X86LIBS_BUILD_DIR" x86libs
@@ -295,7 +308,7 @@ for pe in $TEST_PE_DIRS; do
         X86LIBS_TARGETS+=("$(test_exe "$pe" "$t")")
     done
 done
-make -C "$X86LIBS_BUILD_DIR" -j"$(sysctl -n hw.ncpu)" "${X86LIBS_TARGETS[@]}"
+PATH="$WINE_PATH" make -C "$X86LIBS_BUILD_DIR" -j"$(sysctl -n hw.ncpu)" "${X86LIBS_TARGETS[@]}"
 
 echo "==> Staging the Wine SDK into $WINE_SDK_DIR..."
 claim_tree "$WINE_SDK_DIR" sdk 1

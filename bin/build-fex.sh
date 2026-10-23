@@ -118,6 +118,13 @@ echo "    at $FEX_COMMIT"
 # Where the commit the trees were built from was recorded before FEX_DIST.
 rm -f "$FEX_BUILD_DIR/COMMIT"
 
+# Every tree compiles through WINE_CCACHE when WINE_BUILD_CCACHE is set
+# (profile.sh), as CMake's compiler launcher, and through nothing when it is
+# not: the empty launcher clears one an earlier run set. FEX's own ccache
+# support, which takes any ccache on PATH, is off, so that only the
+# variable decides.
+LAUNCHER=(-DCMAKE_C_COMPILER_LAUNCHER="$WINE_CCACHE" -DCMAKE_CXX_COMPILER_LAUNCHER="$WINE_CCACHE")
+
 # ── PE halves ───────────────────────────────────────────────────────────
 # FEX's own mingw toolchain file picks <triple>-clang from PATH. The install
 # directory is where Wine looks for an aarch64 or ARM64EC builtin.
@@ -134,6 +141,7 @@ for target in wow64 arm64ec; do
         -DCMAKE_INSTALL_LIBDIR="lib/wine/$PE64_DIR" \
         -DENABLE_LTO=False -DENABLE_ASSERTIONS=False -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
         -DBUILD_TESTING=False -DTUNE_ARCH=generic -DTUNE_CPU=none -DRANGES_NATIVE=OFF \
+        -DENABLE_CCACHE=OFF "${LAUNCHER[@]}" \
         >/dev/null
     cmake --build "$FEX_BUILD_DIR/$target"
 done
@@ -148,6 +156,7 @@ cmake -S "$FEX_SRC/Source/Windows/UnixLib" -B "$FEX_BUILD_DIR/unixlib" -G Ninja 
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
     -DCMAKE_INSTALL_LIBDIR="lib/wine/$UNIX_DIR" \
+    "${LAUNCHER[@]}" \
     >/dev/null
 cmake --build "$FEX_BUILD_DIR/unixlib"
 

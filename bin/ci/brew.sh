@@ -189,7 +189,7 @@ prefix_files() {
 # here and not hours into the build.
 check_tools() {
     local t
-    for t in meson cmake ninja pkg-config "$DEPS_PREFIX/opt/bison/bin/bison" \
+    for t in meson cmake ninja pkg-config ccache "$DEPS_PREFIX/opt/bison/bin/bison" \
              "$DEPS_PREFIX/opt/llvm/bin/llvm-config"; do
         if ! "$t" --version >/dev/null 2>&1; then
             echo "Error: $t --version fails:"
@@ -203,7 +203,7 @@ check_tools() {
         echo "LLVMSPIRVLib SPIRV-Tools in $DEPS_PREFIX/lib/pkgconfig"
         exit 1
     fi
-    echo "  meson, cmake, ninja, pkg-config, bison and llvm-config run, and pkg-config finds the packages."
+    echo "  meson, cmake, ninja, pkg-config, ccache, bison and llvm-config run, and pkg-config finds the packages."
 }
 
 check_brew() {

@@ -60,6 +60,55 @@ MESA_REPO="${MESA_REPO:-https://github.com/athei/mesa}"
 MESA_SRC="${MESA_SRC:-$ROOT/src-mesa}"
 MESA_BUILD_DIR="${MESA_BUILD_DIR:-$BUILD_TOP/mesa}"
 MESA_DIST="${MESA_DIST:-$MESA_BUILD_DIR/dist}"
+# WINE_BUILD_CCACHE: the absolute path of a ccache to run the compilers
+# through. Unset, the default, no compiler goes through ccache. Set,
+# WINE_CCACHE is that path, and the scripts run through it Wine's unix and
+# PE compilers (ccache_bin_dir, which build-wine.sh puts ahead of PATH),
+# Mesa's (its native files) and FEX's (CMake's compiler launcher). Each
+# tree follows a change of it on the next run, without --clean. ccache
+# takes CCACHE_DIR, CCACHE_MAXSIZE and its other settings from the
+# environment, except two set here for every compile:
+#  - CCACHE_BASEDIR is ROOT, so ccache hashes the paths under it relative to
+#    it, and a tree in another place can use the same cache.
+#  - CCACHE_COMPILERCHECK names the compilers by version: Apple's clang and
+#    llvm-mingw's, by the first line of their --version. ccache's default is
+#    the size and time of the file it runs, which for Apple's clang is the
+#    /usr/bin shim that stays the same when Xcode changes, and for llvm-mingw
+#    the wrapper script every target shares. ccache hashes the name it runs
+#    as well, which tells llvm-mingw's targets apart, and
+#    MACOSX_DEPLOYMENT_TARGET and DEVELOPER_DIR.
+WINE_CCACHE="${WINE_BUILD_CCACHE:-}"
+if [ -n "$WINE_CCACHE" ]; then
+    case "$WINE_CCACHE" in
+        /*) ;;
+        *) echo "Error: WINE_BUILD_CCACHE=$WINE_CCACHE is not an absolute path"; exit 1 ;;
+    esac
+    if [ ! -x "$WINE_CCACHE" ]; then
+        echo "Error: WINE_BUILD_CCACHE=$WINE_CCACHE is not an executable"
+        exit 1
+    fi
+    export CCACHE_BASEDIR="$ROOT"
+    CCACHE_COMPILERCHECK="string:cc=$(/usr/bin/clang --version 2>/dev/null | head -n 1)"
+    CCACHE_COMPILERCHECK+=" mingw=$("${MINGW_DIR:-/opt/llvm-mingw}/bin/clang" --version 2>/dev/null | head -n 1)"
+    export CCACHE_COMPILERCHECK
+fi
+
+# ccache_bin_dir <dir> <compiler>...: make <dir>, emptied first, a directory
+# of links named <compiler> to WINE_CCACHE. Run as one of them, ccache
+# compiles with the next program of that name on PATH, so a directory of
+# them ahead of PATH puts ccache in front of those compilers while
+# configure and the Makefiles keep naming them as they do without it: Wine's
+# configure takes llvm-mingw's compilers in its MSVC mode only when it finds
+# them on PATH itself, and in its mingw mode when <arch>_CC names them.
+ccache_bin_dir() {
+    local dir="$1" cc
+    shift
+    remove_tree "$dir"
+    mkdir -p "$dir"
+    for cc in "$@"; do
+        ln -s "$WINE_CCACHE" "$dir/$cc"
+    done
+}
 # Configure arguments on top of the allowlist in build-wine.sh: the
 # toolchain and where the dependencies are. Tests are left out: with them,
 # the build's `make` would build every Wine test, and the ones the bundle

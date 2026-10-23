@@ -299,13 +299,25 @@ mesa_setup() {
 # through the arm64 Homebrew's pkg-config files. The versions of those
 # libraries are part of the key, since a tool linked against an upgraded one
 # has to be linked again.
+#
+# The compilers of both native files, Apple's, go through ccache with
+# WINE_BUILD_CCACHE (profile.sh), named by its path, since stage 2 runs with
+# Homebrew off PATH. The native file is part of each setup key, so setting
+# or unsetting it configures both trees again.
+if [ -n "$WINE_CCACHE" ]; then
+    NATIVE_CC="['$WINE_CCACHE', '/usr/bin/clang']"
+    NATIVE_CXX="['$WINE_CCACHE', '/usr/bin/clang++']"
+else
+    NATIVE_CC="'/usr/bin/clang'"
+    NATIVE_CXX="'/usr/bin/clang++'"
+fi
 echo "==> Building KosmicKrisp's host tools..."
 write_if_changed "$MESA_BUILD_DIR/tools-native.ini" <<EOF
 [binaries]
-c = '/usr/bin/clang'
-cpp = '/usr/bin/clang++'
-objc = '/usr/bin/clang'
-objcpp = '/usr/bin/clang++'
+c = $NATIVE_CC
+cpp = $NATIVE_CXX
+objc = $NATIVE_CC
+objcpp = $NATIVE_CXX
 llvm-config = '$LLVM_CONFIG'
 EOF
 (
@@ -362,10 +374,10 @@ echo "==> Building KosmicKrisp and Zink..."
 min="-mmacosx-version-min=$MACOS_FLOOR"
 write_if_changed "$MESA_BUILD_DIR/driver-native.ini" <<EOF
 [binaries]
-c = '/usr/bin/clang'
-cpp = '/usr/bin/clang++'
-objc = '/usr/bin/clang'
-objcpp = '/usr/bin/clang++'
+c = $NATIVE_CC
+cpp = $NATIVE_CXX
+objc = $NATIVE_CC
+objcpp = $NATIVE_CXX
 mesa_clc = '$TOOLS_BUILD/src/compiler/clc/mesa_clc'
 vtn_bindgen2 = '$TOOLS_BUILD/src/compiler/spirv/vtn_bindgen2'
 kk_clc = '$TOOLS_BUILD/src/kosmickrisp/clc/kk_clc'

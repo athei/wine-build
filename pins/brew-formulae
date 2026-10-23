@@ -24,3 +24,5 @@ cmake
 ninja
 meson
 glslang
+# What WINE_BUILD_CCACHE names in release.yml
+ccache
