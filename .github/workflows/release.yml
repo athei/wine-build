@@ -86,7 +86,12 @@ jobs:
 
       # Each key changes with the pins of what its cache holds, not with the
       # rest of redist.env. release-compatdb.yml computes the redist key the
-      # same way, so both workflows share that cache.
+      # same way, so both workflows share that cache. The ccache key rolls:
+      # every run restores the newest one of the prefix, and a run on the
+      # default branch saves its own.
+      # The compilers go through the ccache of the Homebrew formulae
+      # (WINE_BUILD_CCACHE in profile.sh), with its directory and size limit
+      # here.
       - name: Compute the cache keys
         id: keys
         run: |
@@ -95,8 +100,17 @@ jobs:
           xcode=$(xcodebuild -version | awk 'NR == 1 { print $2 }')
           llvm15=$(scripts/bin/ci/pins-key.sh LLVM15_)
           redist=$(scripts/bin/ci/pins-key.sh MTLD3D_ LLVM_MINGW_)
-          echo "llvm15=dxmt-llvm15-$LLVM15_GIT_COMMIT-floor$MACOS_FLOOR-xcode$xcode-$ImageOS-$llvm15" >> "$GITHUB_OUTPUT"
-          echo "redist=redist-$redist" >> "$GITHUB_OUTPUT"
+          {
+            echo "llvm15=dxmt-llvm15-$LLVM15_GIT_COMMIT-floor$MACOS_FLOOR-xcode$xcode-$ImageOS-$llvm15"
+            echo "redist=redist-$redist"
+            echo "ccache-prefix=ccache-$ImageOS-"
+            echo "ccache=ccache-$ImageOS-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "WINE_BUILD_CCACHE=$DEPS_PREFIX/bin/ccache"
+            echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+            echo "CCACHE_MAXSIZE=3G"
+          } >> "$GITHUB_ENV"
 
       # The downloads redist.env pins: llvm-mingw here, mtld3d in the bundle
       # step. Each is checked against its SHA-256 whether it was cached or not.
@@ -122,6 +136,55 @@ jobs:
             ~/.cargo/git
           key: cargo-${{ hashFiles('scripts/compatdb/Cargo.lock') }}
 
+      # One cache per staged dist (docs/arm64.md, commands): Mesa with the
+      # Vulkan loader, FEX, DXMT and vkd3d-proton. Its key is the hash of the
+      # KEY line the dist's build script would write into it now
+      # (--print-key): the commit its ref names, the hash of the script and
+      # profile.sh, and the versions of the compilers, SDK and tools the
+      # script records. The script builds nothing when the dist restored
+      # under that key is complete with that KEY, and builds it otherwise;
+      # the bundle step checks every COMMIT against its ref again. Restored
+      # before the build step and saved right after it, even when that fails
+      # later, when the dist was built here: under the hash of the KEY the
+      # build wrote, so a ref that moved in between cannot file a dist under
+      # another commit's key.
+      - name: Compute the dist cache keys
+        id: dists
+        run: |
+          for c in mesa fex dxmt vkd3d-proton; do
+            key=$(scripts/bin/build-$c.sh --print-key)
+            echo "$c: $key"
+            echo "${c%%-*}=dist-$c-$ImageOS-$(printf '%s\n' "$key" | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Restore Mesa's dist
+        id: mesa-dist
+        uses: actions/cache/restore@v6
+        with:
+          path: build/mesa/dist
+          key: ${{ steps.dists.outputs.mesa }}
+
+      - name: Restore FEX's dist
+        id: fex-dist
+        uses: actions/cache/restore@v6
+        with:
+          path: build/fex/dist
+          key: ${{ steps.dists.outputs.fex }}
+
+      - name: Restore DXMT's dist
+        id: dxmt-dist
+        uses: actions/cache/restore@v6
+        with:
+          path: build/dxmt/dist
+          key: ${{ steps.dists.outputs.dxmt }}
+
+      - name: Restore vkd3d-proton's dist
+        id: vkd3d-dist
+        uses: actions/cache/restore@v6
+        with:
+          path: build/vkd3d-proton/dist
+          key: ${{ steps.dists.outputs.vkd3d }}
+
       # The LLVM 15 libraries DXMT's winemetal.so links, which build-dxmt.sh
       # builds only when this directory holds no build of the pinned commit.
       # Saved right after the build step, even when that fails later.
@@ -132,8 +195,80 @@ jobs:
           path: build/dxmt/llvm15
           key: ${{ steps.keys.outputs.llvm15 }}
 
+      - name: Restore the ccache directory
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.keys.outputs.ccache }}
+          restore-keys: ${{ steps.keys.outputs.ccache-prefix }}
+
+      # So that the statistics after the build are this run's.
+      - name: Reset the ccache statistics
+        run: '"$WINE_BUILD_CCACHE" --zero-stats'
+
+      # Without --clean: the runner starts without build trees, so it would
+      # only delete the dists restored above, which the scripts check
+      # against their KEY themselves.
       - name: Build
-        run: scripts/bin/build-wine.sh --clean
+        id: build
+        run: scripts/bin/build-wine.sh
+
+      - name: Report the ccache statistics
+        if: always() && steps.build.conclusion != 'skipped'
+        run: '"$WINE_BUILD_CCACHE" --show-stats'
+
+      # Only on the default branch: every saved directory is a full one, and
+      # a tag run's could only be read by later runs on that tag, so saving
+      # them would fill the repository's cache budget for little. Tag runs
+      # restore the newest one main saved.
+      - name: Save the ccache directory
+        if: always() && steps.build.conclusion != 'skipped' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.keys.outputs.ccache }}
+
+      # The key each complete dist is saved under, from the KEY its build
+      # wrote; none for a dist that is missing or incomplete.
+      - name: Compute the dist save keys
+        id: saves
+        if: always() && steps.build.conclusion != 'skipped'
+        run: |
+          for c in mesa fex dxmt vkd3d-proton; do
+            dist=build/$c/dist
+            if [ -f "$dist/COMMIT" ] && [ -f "$dist/KEY" ]; then
+              echo "${c%%-*}=dist-$c-$ImageOS-$(shasum -a 256 < "$dist/KEY" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      # Saved when the dist was not restored under the key it has now.
+      - name: Save Mesa's dist
+        if: always() && steps.saves.outputs.mesa != '' && (steps.mesa-dist.outputs.cache-hit != 'true' || steps.saves.outputs.mesa != steps.dists.outputs.mesa)
+        uses: actions/cache/save@v6
+        with:
+          path: build/mesa/dist
+          key: ${{ steps.saves.outputs.mesa }}
+
+      - name: Save FEX's dist
+        if: always() && steps.saves.outputs.fex != '' && (steps.fex-dist.outputs.cache-hit != 'true' || steps.saves.outputs.fex != steps.dists.outputs.fex)
+        uses: actions/cache/save@v6
+        with:
+          path: build/fex/dist
+          key: ${{ steps.saves.outputs.fex }}
+
+      - name: Save DXMT's dist
+        if: always() && steps.saves.outputs.dxmt != '' && (steps.dxmt-dist.outputs.cache-hit != 'true' || steps.saves.outputs.dxmt != steps.dists.outputs.dxmt)
+        uses: actions/cache/save@v6
+        with:
+          path: build/dxmt/dist
+          key: ${{ steps.saves.outputs.dxmt }}
+
+      - name: Save vkd3d-proton's dist
+        if: always() && steps.saves.outputs.vkd3d != '' && (steps.vkd3d-dist.outputs.cache-hit != 'true' || steps.saves.outputs.vkd3d != steps.dists.outputs.vkd3d)
+        uses: actions/cache/save@v6
+        with:
+          path: build/vkd3d-proton/dist
+          key: ${{ steps.saves.outputs.vkd3d }}
 
       - name: Save DXMT's LLVM
         if: always() && steps.llvm15-cache.outputs.cache-hit != 'true' && hashFiles('build/dxmt/llvm15/COMMIT') != ''

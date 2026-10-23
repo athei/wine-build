@@ -141,11 +141,13 @@ releases. Their steps call the build and bundle scripts and the scripts in
 | `ci-*` | [`release.yml`](../.github/workflows/release.yml) | The same build, kept as a workflow artifact for a few days; no release |
 | `compatdb-*` | [`release-compatdb.yml`](../.github/workflows/release-compatdb.yml) | A draft release with the bundle of an `arm64-*` release, `compatdb.so` replaced |
 
-- `release.yml` builds everything from scratch on a hosted runner of the
-  floor's major macOS version, from the branch of athei/wine that
+- `release.yml` builds on a hosted runner of the floor's major macOS
+  version, from the branch of athei/wine that
   [`wine-src.ref`](../pins/wine-src.ref) names and the pins of the tagged
-  commit, and runs the bundle step with `--strict-floor` and `--symbols`. A
-  manual run of it builds the same as a `ci-*` tag.
+  commit, and runs the bundle step with `--strict-floor` and `--symbols`.
+  The runner starts without build trees; what it takes from earlier runs is
+  in [other caches](#other-caches). A manual run of it builds the same as a
+  `ci-*` tag.
 - The first lines of a release's notes name what it was built from, with
   the Homebrew formula and version of each library the bundle carries
   (`package.sh` in [`bin/ci/`](../bin/ci)). The list of changes is added by
@@ -196,10 +198,37 @@ commands and the manifest are described in the header of
 
 ### Other caches
 
-The runner also caches DXMT's LLVM libraries, the downloads `redist.env`
-pins and cargo's registry. Each key changes only with what its cache was made
-from:
+The runner also caches the staged directories of Mesa, FEX, DXMT and
+vkd3d-proton, the compiler output of ccache, DXMT's LLVM libraries, the
+downloads `redist.env` pins and cargo's registry. Each key changes only with
+what its cache was made from:
 
+- Each staged directory: the runner image and the hash of the `KEY` line
+  its build script would write into it, which the script prints with
+  `--print-key` ([commands](arm64.md#commands)). That line names the commit
+  the component's ref resolves to now, the hash of the build script and of
+  [`profile.sh`](../bin/lib/profile.sh), the versions of the compilers,
+  the macOS SDK and the tools the script records, and for DXMT the Wine
+  commit and the hash of `build-wine.sh`. A directory restored under its
+  key is complete and current, so the script builds nothing; any change of
+  those makes a new key, the script builds, and the run saves the result
+  under the hash of the `KEY` that build wrote. The script compares the
+  whole `KEY` before it skips anything, so a directory built by another
+  script or toolchain is built again; the bundle step compares each
+  directory's commits (`COMMIT`, and Mesa's `LOADER_COMMIT` and DXMT's
+  `WINE_COMMIT`) with the pins and the Wine source once more.
+- ccache's directory: the runner image, then the run's ID and attempt.
+  Every run restores the newest directory a run on the default branch saved
+  (the key's prefix), so the objects of every source file that did not
+  change are reused even when a commit changed. Only a run on the default
+  branch saves its own, right after the build step, even when that fails:
+  a tag run's could serve later runs on that tag only, and each directory
+  is a full one, so saving every run's would crowd the repository's cache
+  out. ccache itself checks each object against the compiler, its
+  arguments and the sources, and `CCACHE_MAXSIZE` in `release.yml` bounds
+  the directory. Its statistics for the run follow the build step. Caches
+  unused for a week are evicted, so a release after a longer pause builds
+  everything again.
 - DXMT's LLVM: the LLVM pin in [`redist.env`](../pins/redist.env), the
   floor, the Xcode version and the runner image. A change to how
   `build-dxmt.sh` builds LLVM does not change it, just as a local build
@@ -218,9 +247,11 @@ from:
 - cargo's registry: `compatdb/Cargo.lock`.
 
 A run on a tag writes caches that only later runs on the same tag can read,
-so a failed release that is run again reuses them. A manual run on `main`
-writes caches every run can read; start one after a pin changed to keep the
-tag builds fast.
+so a failed release that is run again reuses them; it writes no ccache
+directory. A manual run on `main` writes caches every run can read; start
+one after a pin, a build script or the Wine branch changed to keep the tag
+builds fast. A tag build without one builds the components that changed
+since the last run on `main` and compiles with that run's ccache directory.
 
 ### Signing identity
 

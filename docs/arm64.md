@@ -100,6 +100,8 @@ The flags are in the [README](../README.md#commands).
   directory, so the script builds. DXMT is also built whenever the Wine
   source has uncommitted changes.
 - `--print-key` makes each of the four scripts print that key and exit.
+  The release workflow keys its caches of the staged directories on it
+  ([other caches](maintenance.md#other-caches)).
 - `WINE_BUILD_CCACHE`, the absolute path of a ccache, runs the compilers of
   Wine (unix and PE), Mesa and FEX through it; unset, nothing goes through
   ccache. Setting or unsetting it takes effect on the next run, without
