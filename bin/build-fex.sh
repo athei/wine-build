@@ -13,23 +13,33 @@ set -e
 #             (Wine loads it as xtajit64.dll)
 #   unixlib/  libwow64fex.so and libarm64ecfex.so, their macOS halves
 #
-# Nothing is installed here: bundle-wine.sh installs from these trees.
+# The four files are installed from the trees and staged in FEX_DIST, in the
+# layout of a Wine install's lib/wine, which bundle-wine.sh installs from:
 #
-# --clean wipes FEX_BUILD_DIR first.
+#   aarch64-windows/{libwow64fex,libarm64ecfex}.dll
+#   aarch64-unix/{libwow64fex,libarm64ecfex}.so
+#   KEY      what the dist was built from (dist_key in profile.sh)
+#   COMMIT   the source commit
+#
+# Nothing is built when FEX_DIST is complete and has the KEY this run would
+# write (skip_current_dist in profile.sh). --clean wipes FEX_BUILD_DIR and
+# FEX_DIST first. --print-key prints that KEY and exits (print_dist_key).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 
 CLEAN=0
+PRINT_KEY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --clean) CLEAN=1; shift ;;
-        *) echo "Usage: $0 [--clean]"; exit 1 ;;
+        --print-key) PRINT_KEY=1; shift ;;
+        *) echo "Usage: $0 [--clean | --print-key]"; exit 1 ;;
     esac
 done
 
-# profile.sh names FEX's repository and clone, says where the trees go and
-# pins the floor of the unix half.
+# profile.sh names FEX's repository, clone and dist, says where the trees go
+# and pins the floor of the unix half.
 # shellcheck source=lib/profile.sh
 . "$SCRIPT_DIR/lib/profile.sh"
 
@@ -54,6 +64,27 @@ done
 # Appended, never prepended: llvm-mingw's bin/ has an unprefixed clang that
 # would otherwise stand in for Apple's in the unixlib build.
 export PATH="$PATH:$MINGW_DIR/bin"
+
+# ── Dist ────────────────────────────────────────────────────────────────
+# fex_key <commit>: the KEY of a FEX_DIST built from <commit>. Besides the
+# commit, which fixes the submodules too, what the trees are built with:
+# llvm-mingw for the PE halves, Apple's clang and the macOS SDK for the unix
+# half, and the floor, which a MACOSX_DEPLOYMENT_TARGET can raise.
+fex_key() {
+    dist_key "$SCRIPT_DIR/build-fex.sh" "fex=$1" "$(mingw_key)" \
+        "cc=$(cc_version /usr/bin/clang)" "$(sdk_key)" "floor=$MACOS_FLOOR"
+}
+FEX_WANT=$(src_ref_commit fex-src.ref "$FEX_REPO")
+print_dist_key "$FEX_WANT" fex-src.ref fex_key
+
+if [ "$CLEAN" -eq 1 ]; then
+    echo "==> Cleaning $FEX_BUILD_DIR..."
+fi
+# FEX_DIST is inside FEX_BUILD_DIR unless overridden, so it is claimed on
+# its own, and so is FEX_DIST.part below.
+claim_tree "$FEX_BUILD_DIR" fex "$CLEAN"
+claim_tree "$FEX_DIST" fex-dist "$CLEAN"
+skip_current_dist "$FEX_DIST" FEX "$FEX_WANT" fex_key
 
 # ── Source ──────────────────────────────────────────────────────────────
 # The ref is fetched from FEX_REPO by URL, so this works the same whatever
@@ -82,13 +113,9 @@ if git -C "$FEX_SRC" submodule status --recursive | grep '^[-+U]' >/dev/null; th
     git -C "$FEX_SRC" submodule status --recursive | grep '^[-+U]'
     exit 1
 fi
-echo "    at $(git -C "$FEX_SRC" rev-parse HEAD)"
-
-if [ "$CLEAN" -eq 1 ]; then
-    echo "==> Cleaning $FEX_BUILD_DIR..."
-fi
-claim_tree "$FEX_BUILD_DIR" fex "$CLEAN"
-# Stale until the build below finishes.
+FEX_COMMIT=$(git -C "$FEX_SRC" rev-parse HEAD)
+echo "    at $FEX_COMMIT"
+# Where the commit the trees were built from was recorded before FEX_DIST.
 rm -f "$FEX_BUILD_DIR/COMMIT"
 
 # ── PE halves ───────────────────────────────────────────────────────────
@@ -124,7 +151,34 @@ cmake -S "$FEX_SRC/Source/Windows/UnixLib" -B "$FEX_BUILD_DIR/unixlib" -G Ninja 
     >/dev/null
 cmake --build "$FEX_BUILD_DIR/unixlib"
 
-# The commit the trees were built from, which bundle-wine.sh compares with
-# what fex-src.ref names.
-git -C "$FEX_SRC" rev-parse HEAD > "$FEX_BUILD_DIR/COMMIT"
-echo "==> FEX $(cat "$FEX_BUILD_DIR/COMMIT") built in $FEX_BUILD_DIR."
+# ── Stage ───────────────────────────────────────────────────────────────
+# Each tree is installed, as CMake installs it for the paths set above, into
+# a scratch prefix, since the install also carries headers, tools and data
+# that have no place in a Wine tree, and only the four files are staged.
+# They go into FEX_DIST.part, which is renamed into place once complete, so
+# an interrupted or failed run never leaves a FEX_DIST that looks finished.
+echo "==> Staging FEX into $FEX_DIST..."
+install="$FEX_BUILD_DIR/install"
+remove_tree "$install"
+for t in wow64 arm64ec unixlib; do
+    cmake --install "$FEX_BUILD_DIR/$t" --prefix "$install" >/dev/null
+done
+part="$FEX_DIST.part"
+claim_tree "$part" fex-dist 1
+mkdir -p "$part/$PE64_DIR" "$part/$UNIX_DIR"
+for f in "$PE64_DIR/libwow64fex.dll" "$PE64_DIR/libarm64ecfex.dll" \
+         "$UNIX_DIR/libwow64fex.so" "$UNIX_DIR/libarm64ecfex.so"; do
+    if [ ! -f "$install/lib/wine/$f" ]; then
+        echo "Error: the FEX install has no lib/wine/$f"
+        exit 1
+    fi
+    cp "$install/lib/wine/$f" "$part/$f"
+done
+remove_tree "$install"
+fex_key "$FEX_COMMIT" > "$part/KEY"
+# Written last, so a staged directory without it is an incomplete one. The
+# bundle step compares it with what fex-src.ref names.
+echo "$FEX_COMMIT" > "$part/COMMIT"
+remove_tree "$FEX_DIST"
+mv "$part" "$FEX_DIST"
+echo "==> FEX $FEX_COMMIT staged in $FEX_DIST."

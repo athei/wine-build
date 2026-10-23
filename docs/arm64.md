@@ -64,9 +64,10 @@ settings they share are in [`profile.sh`](../bin/lib/profile.sh). In short:
 - Network access for the bundle step, which resolves `fex-src.ref`,
   `mesa-src.ref`, `dxmt-src.ref` and `vkd3d-proton-src.ref` and gets the
   loader's secure timestamp. `build-fex.sh`, `build-mesa.sh`,
-  `build-dxmt.sh` and `build-vkd3d-proton.sh` fetch their ref from
-  `FEX_REPO`, `MESA_REPO`, `DXMT_REPO` and `VKD3D_PROTON_REPO` on every run,
-  which needs the network unless the variable names a local clone.
+  `build-dxmt.sh` and `build-vkd3d-proton.sh` ask `FEX_REPO`, `MESA_REPO`,
+  `DXMT_REPO` and `VKD3D_PROTON_REPO` for their ref on every run, and fetch
+  it unless what they staged is current ([commands](#commands)), which
+  needs the network unless the variable names a local clone.
   `build-vkd3d-proton.sh` needs it in any case for the submodules, which
   come from their upstream repositories. `build-mesa.sh` also needs it
   whenever it builds the Vulkan loader or the Python environment of Mesa's
@@ -79,12 +80,26 @@ settings they share are in [`profile.sh`](../bin/lib/profile.sh). In short:
 |--------|--------------|
 | `build-wine.sh` | Runs `build-mesa.sh`, builds Wine against the loader it staged, stages the [Wine SDK](#wine-sdk), then runs `build-fex.sh`, `build-dxmt.sh` and `build-vkd3d-proton.sh`; `--clean` is passed on to all four |
 | [`build-mesa.sh`](../bin/build-mesa.sh) | Checks out the ref in [`mesa-src.ref`](../pins/mesa-src.ref) in `MESA_SRC` (refusing a tree with local changes), builds the Vulkan loader from the tags pinned in [`redist.env`](../pins/redist.env), KosmicKrisp, and Mesa's EGL with Zink, and stages them with the driver's manifest, an `egl.pc` for Wine's configure and their commits in `MESA_DIST` (see [Vulkan](#vulkan) and [OpenGL](#opengl)). Runs alone too |
-| [`build-fex.sh`](../bin/build-fex.sh) | Checks out the ref in [`fex-src.ref`](../pins/fex-src.ref) in `FEX_SRC` (refusing a tree with local changes), builds FEX's emulator DLLs and their unix halves, and records the commit. Runs alone too |
+| [`build-fex.sh`](../bin/build-fex.sh) | Checks out the ref in [`fex-src.ref`](../pins/fex-src.ref) in `FEX_SRC` (refusing a tree with local changes), builds FEX's emulator DLLs and their unix halves, and stages them with their commit in `FEX_DIST`. Runs alone too |
 | [`build-dxmt.sh`](../bin/build-dxmt.sh) | Checks out the ref in [`dxmt-src.ref`](../pins/dxmt-src.ref) in its own clone, builds DXMT against the Wine build and SDK, and stages it with its commit and `git describe` in `DXMT_DIST`. Runs alone too, after a Wine build |
 | [`build-vkd3d-proton.sh`](../bin/build-vkd3d-proton.sh) | Checks out the ref in [`vkd3d-proton-src.ref`](../pins/vkd3d-proton-src.ref) in its own clone, builds vkd3d-proton's D3D12 DLLs, marks them as builtins with the Wine build's and the SDK's `winebuild`, and stages them with their commit and `git describe` in `VKD3D_PROTON_DIST`. Runs alone too, after a Wine build |
 | `bundle-wine.sh` | Assembles the bundle from the Wine build, the SDK, FEX, DXMT, vkd3d-proton, the Vulkan loader, KosmicKrisp and EGL, and the mtld3d release, signs the loader and runs the smoke test |
 
 The flags are in the [README](../README.md#commands).
+
+- Each staged directory, `MESA_DIST`, `FEX_DIST`, `DXMT_DIST` and
+  `VKD3D_PROTON_DIST`, holds a `KEY` file next to its `COMMIT`: one line
+  naming what it was built from, the source commit, the hash of the script
+  that built it and of [`profile.sh`](../bin/lib/profile.sh) (for DXMT also
+  of `build-wine.sh`, whose Wine build it links against), and the versions
+  of the compilers, SDK and tools that script records (each script's key
+  function says which). Before it fetches anything, the script asks
+  its repository for the commit its ref names now, and builds nothing when
+  the staged directory is complete and has the key it would write for that
+  commit; it says so in a line of its own. `--clean` deletes the staged
+  directory, so the script builds. DXMT is also built whenever the Wine
+  source has uncommitted changes.
+- `--print-key` makes each of the four scripts print that key and exit.
 
 ## Paths
 
@@ -102,7 +117,8 @@ of the same name; the defaults are set in
 | `X86LIBS_BUILD_DIR` | The x86 tree for the x86_64 archives and the [graphics tests](#graphics-tests) of the SDK |
 | `WINE_SDK_DIR` | The [Wine SDK](#wine-sdk) |
 | `FEX_REPO`, `FEX_SRC` | FEX repository and the local clone `build-fex.sh` checks out |
-| `FEX_BUILD_DIR` | FEX's CMake trees |
+| `FEX_BUILD_DIR` | FEX's CMake trees and, by default, `FEX_DIST` |
+| `FEX_DIST` | FEX's emulator DLLs and their unix halves as the bundle installs them, with the commit they were built from |
 | `DXMT_REPO` | DXMT repository `build-dxmt.sh` fetches the ref from |
 | `DXMT_BUILD_DIR` | DXMT's checkout, its meson trees (ARM64X PE with the arm64 unix half, and i386 PE) and, by default, `DXMT_LLVM` and `DXMT_DIST` |
 | `DXMT_LLVM` | The LLVM static libraries `winemetal.so` links |
@@ -501,7 +517,7 @@ does not run without it.
 Before anything is deleted, the preflight checks the macOS SDK, the
 formulae, the Wine SDK (staged from the current Wine source and, for a full
 bundle, holding every [graphics test](#graphics-tests) and their
-`VERSION`), the FEX build (complete, and built from the commit
+`VERSION`), the staged FEX (complete, and built from the commit
 `fex-src.ref` names now, which it asks `FEX_REPO` for with
 `git ls-remote`, so the step needs the network), the staged DXMT
 (complete, built from the commit `dxmt-src.ref` names now, asked of

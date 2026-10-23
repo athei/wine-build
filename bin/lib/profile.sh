@@ -167,10 +167,11 @@ VKD3D_PROTON_REPO="${VKD3D_PROTON_REPO:-https://github.com/athei/vkd3d-proton}"
 VKD3D_PROTON_BUILD_DIR="${VKD3D_PROTON_BUILD_DIR:-$BUILD_TOP/vkd3d-proton}"
 VKD3D_PROTON_DIST="${VKD3D_PROTON_DIST:-$VKD3D_PROTON_BUILD_DIR/dist}"
 # FEX's repository, the local clone build-fex.sh checks out fex-src.ref in,
-# and its build trees.
+# its build trees, and FEX as build-fex.sh stages it for the bundle.
 FEX_REPO="${FEX_REPO:-https://github.com/athei/FEX}"
 FEX_SRC="${FEX_SRC:-$ROOT/src-fex}"
 FEX_BUILD_DIR="${FEX_BUILD_DIR:-$BUILD_TOP/fex}"
+FEX_DIST="${FEX_DIST:-$FEX_BUILD_DIR/dist}"
 LOADER_PROFILE="${LOADER_PROFILE:-$REPO_DIR/signing/loader.provisionprofile}"
 # The llvm-mingw targets the smoke test builds smoke/hello.c for and runs:
 # native, and the two x86 ones FEX emulates.
@@ -451,6 +452,100 @@ src_ref_commit() {
         $2 == "refs/tags/" ref { tag = $1 }
         $2 == "refs/heads/" ref { head = $1 }
         END { if (peeled != "") print peeled; else if (tag != "") print tag; else if (head != "") print head }'
+}
+
+# The staged dists. build-mesa.sh, build-fex.sh, build-dxmt.sh and
+# build-vkd3d-proton.sh each stage what the bundle takes from them in a
+# directory of its own (MESA_DIST, FEX_DIST, DXMT_DIST, VKD3D_PROTON_DIST)
+# with two records: KEY, one line naming everything the dist was built from
+# (dist_key), and COMMIT, the source commit, written last, so a dist without
+# it is incomplete. Before it fetches anything, each script asks the
+# repository what its ref names now (src_ref_commit) and builds nothing when
+# its dist is complete and has the KEY it would write for that commit
+# (skip_current_dist). --clean deletes the dist, so it always builds. With
+# --print-key, each prints that KEY and exits instead (print_dist_key), and
+# release.yml keys its cache of the dist on it.
+
+# dist_key [--hash <file>]... <script> <input>...: print, on one line, the
+# KEY <script> writes into its dist: the SHA-256 of <script>, of this file
+# and of each --hash <file>, which together say how the dist and what it
+# links against are built (options, flags, the floor), and each <input>: the
+# source commit and what else the dist is built from that none of the files
+# fixes, such as the version of a compiler or of a library a build tool
+# links.
+dist_key() {
+    local files=() hash
+    while [ "$1" = --hash ]; do
+        files+=("$2")
+        shift 2
+    done
+    files=("$1" "${files[@]}" "$SCRIPT_DIR/lib/profile.sh")
+    shift
+    hash=$(cat "${files[@]}" | shasum -a 256 | cut -d' ' -f1)
+    echo "scripts=$hash $*"
+}
+
+# cc_version <compiler>: print the first line of `<compiler> --version`,
+# which names its version, or nothing when it does not run.
+cc_version() {
+    "$1" --version 2>/dev/null | head -n 1
+}
+
+# mingw_key: print, for a KEY, which llvm-mingw MINGW_DIR holds: its clang's
+# version and its release, as the .llvm-mingw-version file that
+# bin/ci/llvm-mingw.sh writes names it. A release can change its headers and
+# runtime without a new clang, so where that file is missing, as in a tree
+# unpacked by hand, the hash of the mingw-w64 version header stands in.
+mingw_key() {
+    local release f
+    release=$(cat "$MINGW_DIR/.llvm-mingw-version" 2>/dev/null) || release=""
+    if [ -z "$release" ]; then
+        for f in "$MINGW_DIR/include/_mingw_mac.h" "$MINGW_DIR/generic-w64-mingw32/include/_mingw_mac.h"; do
+            if [ -f "$f" ]; then
+                release="header-$(shasum -a 256 < "$f" | cut -d' ' -f1)"
+                break
+            fi
+        done
+    fi
+    echo "mingw=$(cc_version "$MINGW_DIR/bin/clang") mingw-release=${release:-unknown}"
+}
+
+# sdk_key: print, for a KEY, the macOS SDK the host compiles against: its
+# version and build, which change with Xcode as Apple's clang may not.
+sdk_key() {
+    echo "sdk=$(xcrun --show-sdk-version 2>/dev/null) sdk-build=$(xcrun --show-sdk-build-version 2>/dev/null)"
+}
+
+# print_dist_key <commit> <ref-file> <key-function>: with --print-key
+# (PRINT_KEY=1), print the KEY <key-function> gives for <commit>, the commit
+# <ref-file> resolved to, and exit; exit with an error when it did not
+# resolve. Without it, do nothing.
+print_dist_key() {
+    [ "${PRINT_KEY:-0}" -eq 1 ] || return 0
+    if [ -z "$1" ]; then
+        echo "Error: cannot resolve $2 ($(tr -d '[:space:]' < "$PINS_DIR/$2"))" >&2
+        exit 1
+    fi
+    "$3" "$1"
+    exit 0
+}
+
+# skip_current_dist <dir> <name> <commit> <key-function>: exit, saying so,
+# when <dir> holds a complete dist from <commit>, the commit the ref names
+# now (its COMMIT), whose KEY is the one <key-function> gives for <commit>.
+# An empty <commit>, a ref that did not resolve, never matches: the script
+# then fetches the ref and builds.
+skip_current_dist() {
+    local key
+    [ -n "$3" ] && [ -f "$1/COMMIT" ] || return 0
+    key=$("$4" "$3")
+    if [ "$(cat "$1/COMMIT")" != "$3" ] || [ "$(cat "$1/KEY" 2>/dev/null)" != "$key" ]; then
+        echo "==> $2: $1 is not $3 with the KEY it would get now; building"
+        return 0
+    fi
+    echo "==> $2 $3 is staged in $1 with the KEY it would get now; not building it"
+    echo "    (--clean builds it again)"
+    exit 0
 }
 
 # pinned_clone <url> <tag> <commit> <dir>: make <dir> a shallow clone of

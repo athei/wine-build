@@ -9,6 +9,7 @@ set -e
 #
 #   aarch64-windows/{d3d12,d3d12core}.dll   ARM64X
 #   i386-windows/{d3d12,d3d12core}.dll      i386
+#   KEY          what the dist was built from (dist_key in profile.sh)
 #   COMMIT       the source commit
 #   DESCRIBE     its `git describe --tags`, the version vkd3d-proton's build
 #                records for itself
@@ -43,16 +44,21 @@ set -e
 # vkd3d-proton compiles its internal shaders with glslang, from the arm64
 # Homebrew (pins/brew-formulae).
 #
-# --clean wipes the vkd3d-proton checkout, trees and VKD3D_PROTON_DIST first.
+# Nothing is built when VKD3D_PROTON_DIST is complete and has the KEY this
+# run would write (skip_current_dist in profile.sh). --clean wipes the
+# vkd3d-proton checkout, trees and VKD3D_PROTON_DIST first. --print-key
+# prints that KEY and exits (print_dist_key).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 
 CLEAN=0
+PRINT_KEY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --clean) CLEAN=1; shift ;;
-        *) echo "Usage: $0 [--clean]"; exit 1 ;;
+        --print-key) PRINT_KEY=1; shift ;;
+        *) echo "Usage: $0 [--clean | --print-key]"; exit 1 ;;
     esac
 done
 
@@ -86,6 +92,33 @@ if [ -z "$GLSLANG" ]; then
     echo "Error: glslang not found (brew install glslang)"
     exit 1
 fi
+
+# ── Dist ────────────────────────────────────────────────────────────────
+# vkd3d_proton_key <commit>: the KEY of a VKD3D_PROTON_DIST built from
+# <commit>, which fixes the submodules too, with what vkd3d_setup below
+# configures a tree again for, llvm-mingw's clang and glslang, and
+# llvm-mingw's release, whose headers and runtime the DLLs are built with.
+# As there, the Wine commit is not part of it: the DLLs link nothing of
+# Wine.
+vkd3d_proton_key() {
+    dist_key "$SCRIPT_DIR/build-vkd3d-proton.sh" "vkd3d-proton=$1" \
+        "$(mingw_key)" "glslang=$(cc_version "$GLSLANG")"
+}
+VKD3D_PROTON_WANT=$(src_ref_commit vkd3d-proton-src.ref "$VKD3D_PROTON_REPO")
+print_dist_key "$VKD3D_PROTON_WANT" vkd3d-proton-src.ref vkd3d_proton_key
+
+# The checkout and meson trees this script deletes and recreates are fixed
+# paths in VKD3D_PROTON_BUILD_DIR. VKD3D_PROTON_DIST is inside it unless
+# overridden, so it is claimed on its own, and so is VKD3D_PROTON_DIST.part
+# below.
+claim_tree "$VKD3D_PROTON_BUILD_DIR" vkd3d-proton
+if [ "$CLEAN" -eq 1 ]; then
+    echo "==> Cleaning the vkd3d-proton trees..."
+    remove_tree "$VKD3D_PROTON_SRC" "$VKD3D_PROTON_BUILD_DIR/arm64x" "$VKD3D_PROTON_BUILD_DIR/win32"
+fi
+claim_tree "$VKD3D_PROTON_DIST" vkd3d-proton-dist "$CLEAN"
+skip_current_dist "$VKD3D_PROTON_DIST" vkd3d-proton "$VKD3D_PROTON_WANT" vkd3d_proton_key
+
 if [ ! -x "$WINEBUILD64" ]; then
     echo "Error: $WINEBUILD64 not found (run build-wine.sh first)"
     exit 1
@@ -122,24 +155,13 @@ if [ ! -x "$MINGW_DIR/bin/llvm-readobj" ]; then
     exit 1
 fi
 
-# The checkout and meson trees this script deletes and recreates are fixed
-# paths in VKD3D_PROTON_BUILD_DIR. VKD3D_PROTON_DIST is inside it unless
-# overridden, so it is claimed on its own, and so is VKD3D_PROTON_DIST.part
-# below.
-claim_tree "$VKD3D_PROTON_BUILD_DIR" vkd3d-proton
-if [ "$CLEAN" -eq 1 ]; then
-    echo "==> Cleaning the vkd3d-proton trees..."
-    remove_tree "$VKD3D_PROTON_SRC" "$VKD3D_PROTON_BUILD_DIR/arm64x" "$VKD3D_PROTON_BUILD_DIR/win32"
-fi
-claim_tree "$VKD3D_PROTON_DIST" vkd3d-proton-dist "$CLEAN"
-
 # ── Source ──────────────────────────────────────────────────────────────
 # As in build-dxmt.sh: VKD3D_PROTON_SRC is this script's own scratch clone,
-# forced to the ref fetched from VKD3D_PROTON_REPO by URL on every run, with
-# every tag, since vkd3d-proton's build runs `git describe --tags` for its
-# version. The submodules (dxil-spirv, with its own, and the Khronos headers)
-# are fetched shallow at the commits the ref records; nothing describes
-# them. git is kept from asking for credentials.
+# forced to the ref fetched from VKD3D_PROTON_REPO by URL on every run that
+# builds, with every tag, since vkd3d-proton's build runs `git describe
+# --tags` for its version. The submodules (dxil-spirv, with its own, and the
+# Khronos headers) are fetched shallow at the commits the ref records;
+# nothing describes them. git is kept from asking for credentials.
 echo "==> vkd3d-proton source: $VKD3D_PROTON_REPO $VKD3D_PROTON_REF"
 if [ ! -e "$VKD3D_PROTON_SRC/.git" ]; then
     GIT_TERMINAL_PROMPT=0 git clone --quiet --no-checkout "$VKD3D_PROTON_REPO" "$VKD3D_PROTON_SRC"
@@ -252,6 +274,7 @@ done
 
 echo "$VKD3D_PROTON_DESCRIBE" > "$part/DESCRIBE"
 wine_src_commit > "$part/WINE_COMMIT"
+vkd3d_proton_key "$VKD3D_PROTON_COMMIT" > "$part/KEY"
 # Written last, so a staged directory without it is an incomplete one.
 echo "$VKD3D_PROTON_COMMIT" > "$part/COMMIT"
 remove_tree "$VKD3D_PROTON_DIST"

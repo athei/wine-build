@@ -167,8 +167,8 @@ bin/bundle-wine.sh   # assemble the bundle (see Layout)
 
 | Script | Flag | Effect |
 |--------|------|--------|
-| `build-wine.sh` | none | Incremental build; configure runs only when the build directory has no Makefile, and in the x86 tree of the [Wine SDK](docs/arm64.md#wine-sdk) also when its configure arguments or `WINE_SRC` (the source path) changed |
-| `build-wine.sh` | `--clean` | Wipes the build directories first, and is passed on to `build-mesa.sh`, `build-fex.sh`, `build-dxmt.sh` and `build-vkd3d-proton.sh`; the only way to pick up changed configure flags or deployment target, except in the x86 tree of the [Wine SDK](docs/arm64.md#wine-sdk), which is configured again whenever its flags or `WINE_SRC` change |
+| `build-wine.sh` | none | Incremental build; configure runs only when the build directory has no Makefile, and in the x86 tree of the [Wine SDK](docs/arm64.md#wine-sdk) also when its configure arguments or `WINE_SRC` (the source path) changed. Mesa, FEX, DXMT and vkd3d-proton are not built at all while what they staged is current ([commands](docs/arm64.md#commands)) |
+| `build-wine.sh` | `--clean` | Wipes the build directories and what they staged first, and is passed on to `build-mesa.sh`, `build-fex.sh`, `build-dxmt.sh` and `build-vkd3d-proton.sh`; the only way to pick up changed configure flags or deployment target, except in the x86 tree of the [Wine SDK](docs/arm64.md#wine-sdk), which is configured again whenever its flags or `WINE_SRC` change |
 | `bundle-wine.sh` | `--dest <dir>` | Writes `<dir>/wine` instead of the bundle in the [layout](#layout). Either way it asks before it deletes an existing one, unless `--yes` |
 | `bundle-wine.sh` | `--yes` | Deletes an existing bundle without asking, for an unattended run. A directory that is not empty and has no `bin/wine` is still refused |
 | `bundle-wine.sh` | `--runtime-only` | No development files; the flavor to put into an application |

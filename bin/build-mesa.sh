@@ -18,6 +18,8 @@ set -e
 #                                    the driver's manifest, which names the
 #                                    driver by a path relative to itself
 #   LOADER_COMMIT                    the loader's source commit
+#   KEY                              what the dist was built from
+#                                    (dist_key in profile.sh)
 #   COMMIT                           Mesa's source commit
 #
 # Mesa comes from athei/mesa (upstream Mesa plus our topic commits,
@@ -41,18 +43,22 @@ set -e
 # Python modules, which come from a virtual environment in MESA_BUILD_DIR, at
 # the versions redist.env pins.
 #
-# --clean builds the driver tree and MESA_DIST from scratch. Like
-# build-dxmt.sh's LLVM, what does not depend on Mesa's source is kept while
-# its key matches: the loader and header clones, the built loader, the
-# Python environment and the stage 1 tools.
+# Nothing is built when MESA_DIST is complete and has the KEY this run would
+# write (skip_current_dist in profile.sh). --clean builds the driver tree and
+# MESA_DIST from scratch. Like build-dxmt.sh's LLVM, what does not depend on
+# Mesa's source is kept while its key matches: the loader and header clones,
+# the built loader, the Python environment and the stage 1 tools.
+# --print-key prints that KEY and exits (print_dist_key).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 CLEAN=0
+PRINT_KEY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --clean) CLEAN=1; shift ;;
-        *) echo "Usage: $0 [--clean]"; exit 1 ;;
+        --print-key) PRINT_KEY=1; shift ;;
+        *) echo "Usage: $0 [--clean | --print-key]"; exit 1 ;;
     esac
 done
 
@@ -136,9 +142,43 @@ check_sdk_floor
 unset CC CXX OBJC OBJCXX CFLAGS CXXFLAGS OBJCFLAGS CPPFLAGS LDFLAGS \
       PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
 
+# ── Dist ────────────────────────────────────────────────────────────────
+# mesa_key <commit>: the KEY of a MESA_DIST built from <commit>. Besides the
+# commit, what the loader's key and the setup keys of the two trees below
+# hold, as far as it is known before anything is built: the pinned loader and
+# headers, the floor, the Python modules and Python, the versions of the
+# Homebrew libraries the stage 1 tools link, bison and flex; and Apple's
+# clang and the macOS SDK, which compile all of it. The stage 1 tools are fixed by these
+# inputs, so their hash, which stage 2's key holds, is left out. The
+# versions are read once, here, as the Python environment goes ahead of
+# PATH below.
+MESA_KEY_INPUTS="headers=$VULKAN_HEADERS_GIT_COMMIT loader=$VULKAN_LOADER_GIT_COMMIT floor=$MACOS_FLOOR"
+MESA_KEY_INPUTS+=" requirements=$MESA_PYTHON_REQUIREMENTS"
+MESA_KEY_INPUTS+=" python=$(python3 -c 'import platform; print(platform.python_version())')"
+MESA_KEY_INPUTS+=" llvm=$("$LLVM_CONFIG" --version)"
+MESA_KEY_INPUTS+=" spirv=$(PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig" pkg-config --modversion LLVMSPIRVLib SPIRV-Tools | paste -sd ' ' -)"
+MESA_KEY_INPUTS+=" bison=$(cc_version "$BISON") flex=$(cc_version "$FLEX") cc=$(cc_version /usr/bin/clang)"
+MESA_KEY_INPUTS+=" $(sdk_key)"
+mesa_key() {
+    dist_key "$SCRIPT_DIR/build-mesa.sh" "mesa=$1" "$MESA_KEY_INPUTS"
+}
+MESA_WANT=$(src_ref_commit mesa-src.ref "$MESA_REPO")
+print_dist_key "$MESA_WANT" mesa-src.ref mesa_key
+
+# The trees this script deletes and recreates are fixed paths in
+# MESA_BUILD_DIR. MESA_DIST is inside it unless overridden, so it is claimed
+# on its own, and so is MESA_DIST.part below.
+claim_tree "$MESA_BUILD_DIR" mesa
+if [ "$CLEAN" -eq 1 ]; then
+    echo "==> Cleaning the KosmicKrisp driver tree and $MESA_DIST..."
+    remove_tree "$DRIVER_BUILD" "$DRIVER_PREFIX"
+fi
+claim_tree "$MESA_DIST" mesa-dist "$CLEAN"
+skip_current_dist "$MESA_DIST" Mesa "$MESA_WANT" mesa_key
+
 # ── Source ──────────────────────────────────────────────────────────────
-# As in build-fex.sh: the ref is fetched from MESA_REPO by URL, every run,
-# and a tree with local changes is refused rather than reset. git is kept
+# As in build-fex.sh: the ref is fetched from MESA_REPO by URL, on every run
+# that builds, and a tree with local changes is refused rather than reset. git is kept
 # from asking for credentials, so an unattended run fails instead of
 # waiting.
 echo "==> Mesa source: $MESA_REPO $MESA_REF"
@@ -154,16 +194,6 @@ GIT_TERMINAL_PROMPT=0 git -C "$MESA_SRC" fetch --quiet "$MESA_REPO" "$MESA_REF"
 git -C "$MESA_SRC" checkout --quiet --detach FETCH_HEAD
 MESA_COMMIT=$(git -C "$MESA_SRC" rev-parse HEAD)
 echo "    at $MESA_COMMIT"
-
-# The trees this script deletes and recreates are fixed paths in
-# MESA_BUILD_DIR. MESA_DIST is inside it unless overridden, so it is claimed
-# on its own, and so is MESA_DIST.part below.
-claim_tree "$MESA_BUILD_DIR" mesa
-if [ "$CLEAN" -eq 1 ]; then
-    echo "==> Cleaning the KosmicKrisp driver tree and $MESA_DIST..."
-    remove_tree "$DRIVER_BUILD" "$DRIVER_PREFIX"
-fi
-claim_tree "$MESA_DIST" mesa-dist "$CLEAN"
 
 # ── Vulkan loader ───────────────────────────────────────────────────────
 # Built once per key: the two pinned commits and the floor. LOADER_PREFIX/KEY
@@ -521,6 +551,7 @@ fi
 echo "    $GALLIUM opens the Vulkan loader next to it (@rpath, LC_RPATH @loader_path)"
 
 echo "$VULKAN_LOADER_GIT_COMMIT" > "$part/LOADER_COMMIT"
+mesa_key "$MESA_COMMIT" > "$part/KEY"
 # Written last, so a staged directory without it is an incomplete one.
 echo "$MESA_COMMIT" > "$part/COMMIT"
 remove_tree "$MESA_DIST"

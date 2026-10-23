@@ -9,6 +9,7 @@ set -e
 #   aarch64-windows/{dxgi,d3d10core,d3d11,winemetal}.dll   ARM64X
 #   i386-windows/{dxgi,d3d10core,d3d11,winemetal}.dll      i386
 #   aarch64-unix/winemetal.so
+#   KEY          what the dist was built from (dist_key in profile.sh)
 #   COMMIT       the source commit
 #   DESCRIBE     its `git describe`, the version string DXMT builds into d3d11.dll
 #   WINE_COMMIT  the Wine source commit it was linked against
@@ -55,17 +56,23 @@ set -e
 # from the pinned tag into DXMT_LLVM, following Hadron's recipe, and reused
 # while the pin stays.
 #
-# --clean wipes the DXMT checkout, trees and DXMT_DIST first (not DXMT_LLVM,
-# which takes long to build and does not depend on anything here).
+# Nothing is built, LLVM included, when DXMT_DIST is complete and has the
+# KEY this run would write (skip_current_dist in profile.sh). --clean wipes
+# the DXMT checkout, trees and DXMT_DIST first (not DXMT_LLVM, which takes
+# long to build and does not depend on anything here). --print-key prints
+# that KEY and exits (print_dist_key); it needs the Wine source, not the
+# Wine build.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MINGW_DIR="${MINGW_DIR:-/opt/llvm-mingw}"
 
 CLEAN=0
+PRINT_KEY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --clean) CLEAN=1; shift ;;
-        *) echo "Usage: $0 [--clean]"; exit 1 ;;
+        --print-key) PRINT_KEY=1; shift ;;
+        *) echo "Usage: $0 [--clean | --print-key]"; exit 1 ;;
     esac
 done
 
@@ -96,6 +103,47 @@ if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
     echo "Error: no Metal compiler (xcrun metal); install Xcode and its Metal toolchain"
     exit 1
 fi
+
+# ── Dist ────────────────────────────────────────────────────────────────
+# dxmt_key <commit>: the KEY of a DXMT_DIST built from <commit>. Besides the
+# commit, what dxmt_setup below configures a tree again for: the Wine
+# commit, whose build and SDK it links against, the LLVM commit and
+# llvm-mingw's clang; how that Wine build is made, build-wine.sh, which the
+# key hashes with this script; llvm-mingw's release; and what compiles
+# winemetal.so and its shaders, which that key leaves out: Apple's clang,
+# the macOS SDK, the Metal compiler and the floor.
+WINE_COMMIT=$(wine_src_commit)
+dxmt_key() {
+    dist_key --hash "$SCRIPT_DIR/build-wine.sh" "$SCRIPT_DIR/build-dxmt.sh" "dxmt=$1" \
+        "wine=$WINE_COMMIT" "llvm=$LLVM15_GIT_COMMIT" "$(mingw_key)" \
+        "cc=$(cc_version /usr/bin/clang)" "$(sdk_key)" \
+        "metal=$(xcrun -sdk macosx metal --version 2>/dev/null | head -n 1)" "floor=$MACOS_FLOOR"
+}
+DXMT_WANT=$(src_ref_commit dxmt-src.ref "$DXMT_REPO")
+print_dist_key "$DXMT_WANT" dxmt-src.ref dxmt_key
+
+# The checkouts and meson trees this script deletes and recreates are fixed
+# paths in DXMT_BUILD_DIR. DXMT_LLVM and DXMT_DIST are inside it unless
+# overridden, so they are claimed on their own, and so is DXMT_LLVM.part
+# below.
+claim_tree "$DXMT_BUILD_DIR" dxmt
+claim_tree "$DXMT_LLVM" dxmt-llvm
+# win64 and unix are the x86_64 PE and arm64 unix trees of the layout before
+# the arm64x tree, which nothing builds any more.
+if [ "$CLEAN" -eq 1 ]; then
+    echo "==> Cleaning the DXMT trees..."
+    remove_tree "$DXMT_SRC" "$DXMT_BUILD_DIR/arm64x" "$DXMT_BUILD_DIR/win32" \
+                "$DXMT_BUILD_DIR/win64" "$DXMT_BUILD_DIR/unix"
+fi
+claim_tree "$DXMT_DIST" dxmt-dist "$CLEAN"
+# A Wine source with uncommitted changes is one state ("-dirty") however
+# those changes move, so a dist built against one is never taken as
+# current; the build is then incremental.
+case "$WINE_COMMIT" in
+    *-dirty) ;;
+    *) skip_current_dist "$DXMT_DIST" DXMT "$DXMT_WANT" dxmt_key ;;
+esac
+
 if [ ! -f "$BUILD_DIR/Makefile" ]; then
     echo "Error: no Wine build at $BUILD_DIR (run build-wine.sh first)"
     exit 1
@@ -114,7 +162,6 @@ done
 # The SDK, which the i386 DLLs link against, must be the one staged from
 # this Wine source, or they would link against another Wine's unix call
 # setup.
-WINE_COMMIT=$(wine_src_commit)
 if [ "$(cat "$WINE_SDK_DIR/WINE_COMMIT" 2>/dev/null)" != "$WINE_COMMIT" ]; then
     echo "Error: the Wine SDK at $WINE_SDK_DIR is for $(cat "$WINE_SDK_DIR/WINE_COMMIT" 2>/dev/null || echo nothing),"
     echo "but $WINE_SRC is at $WINE_COMMIT (run build-wine.sh)"
@@ -146,21 +193,6 @@ if [ ! -x "$MINGW_DIR/bin/llvm-readobj" ]; then
     echo "Error: no llvm-readobj in $MINGW_DIR/bin"
     exit 1
 fi
-
-# The checkouts and meson trees this script deletes and recreates are fixed
-# paths in DXMT_BUILD_DIR. DXMT_LLVM and DXMT_DIST are inside it unless
-# overridden, so they are claimed on their own, and so is DXMT_LLVM.part
-# below.
-claim_tree "$DXMT_BUILD_DIR" dxmt
-claim_tree "$DXMT_LLVM" dxmt-llvm
-# win64 and unix are the x86_64 PE and arm64 unix trees of the layout before
-# the arm64x tree, which nothing builds any more.
-if [ "$CLEAN" -eq 1 ]; then
-    echo "==> Cleaning the DXMT trees..."
-    remove_tree "$DXMT_SRC" "$DXMT_BUILD_DIR/arm64x" "$DXMT_BUILD_DIR/win32" \
-                "$DXMT_BUILD_DIR/win64" "$DXMT_BUILD_DIR/unix"
-fi
-claim_tree "$DXMT_DIST" dxmt-dist "$CLEAN"
 
 # ── LLVM 15 ─────────────────────────────────────────────────────────────
 # Only the libraries airconv links: no targets, no tools. The libc++ define
@@ -201,8 +233,9 @@ fi
 
 # ── DXMT source ─────────────────────────────────────────────────────────
 # DXMT_SRC is this script's own scratch clone, not somebody's work tree, so
-# it is forced to the ref every run instead of being refused when it has
-# changes, as FEX's and Mesa's checkouts are. As in build-fex.sh, the ref is
+# it is forced to the ref on every run that builds instead of being refused
+# when it has changes, as FEX's and Mesa's checkouts are. As in build-fex.sh,
+# the ref is
 # fetched from DXMT_REPO by URL, so a clone made from another repository (a
 # changed DXMT_REPO) still builds what DXMT_REPO has, and git is kept from
 # asking for credentials. A full clone, not a shallow one, with every tag:
@@ -309,6 +342,7 @@ if ! strings -a "$DXMT_DIST/$PE64_DIR/d3d11.dll" | grep -xF "$DXMT_DESCRIBE" >/d
 fi
 echo "$DXMT_DESCRIBE" > "$DXMT_DIST/DESCRIBE"
 echo "$WINE_COMMIT" > "$DXMT_DIST/WINE_COMMIT"
+dxmt_key "$DXMT_COMMIT" > "$DXMT_DIST/KEY"
 # Written last, so a staged directory without it is an incomplete one.
 echo "$DXMT_COMMIT" > "$DXMT_DIST/COMMIT"
 echo "==> DXMT $DXMT_DESCRIBE staged."

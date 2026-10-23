@@ -1561,24 +1561,13 @@ check_no_d3d12() {
     echo "    $arch, $label: dxgi.dll loads, d3d12.dll does not (error 126)"
 }
 
-# check_fex_build: exit unless build-fex.sh built all of FEX from the commit
-# fex-src.ref names now. Needs the network, to resolve a branch or tag.
+# check_fex_build: exit unless build-fex.sh staged all of FEX in FEX_DIST
+# from the commit fex-src.ref names now: the COMMIT it wrote last. Needs the
+# network, to resolve a branch or tag.
 check_fex_build() {
-    local t tool built want
-    for tool in cmake ninja; do
-        if ! command -v "$tool" >/dev/null; then
-            echo "Error: $tool not found (installing FEX from its build trees needs it)"
-            exit 1
-        fi
-    done
-    for t in wow64 arm64ec unixlib; do
-        if [ ! -f "$FEX_BUILD_DIR/$t/build.ninja" ]; then
-            echo "Error: no FEX build at $FEX_BUILD_DIR/$t (run build-wine.sh)"
-            exit 1
-        fi
-    done
-    built=$(cat "$FEX_BUILD_DIR/COMMIT" 2>/dev/null) || {
-        echo "Error: $FEX_BUILD_DIR has no COMMIT; the last build-fex.sh run did not finish"
+    local f built want
+    built=$(cat "$FEX_DIST/COMMIT" 2>/dev/null) || {
+        echo "Error: $FEX_DIST has no COMMIT; build-fex.sh has not staged it (run build-wine.sh)"
         exit 1
     }
     want=$(src_ref_commit fex-src.ref "$FEX_REPO")
@@ -1591,6 +1580,13 @@ check_fex_build() {
         echo "(run build-fex.sh)"
         exit 1
     fi
+    for f in "$PE64_DIR/libwow64fex.dll" "$PE64_DIR/libarm64ecfex.dll" \
+             "$UNIX_DIR/libwow64fex.so" "$UNIX_DIR/libarm64ecfex.so"; do
+        if [ ! -f "$FEX_DIST/$f" ]; then
+            echo "Error: no $f in $FEX_DIST (run build-fex.sh)"
+            exit 1
+        fi
+    done
     echo "  FEX: $built"
 }
 
@@ -2708,30 +2704,16 @@ echo "==> Step 4b: Compat database"
 build_compatdb
 
 # ── Step 4d: FEX ────────────────────────────────────────────────────────
-# FEX from the trees build-fex.sh built, installed into a scratch prefix
-# first because its install also carries headers, tools and data that have no
-# place in a Wine tree. Wine loads its x86 emulators as xtajit.dll (i386
-# under WoW64) and xtajit64.dll (x86_64 as ARM64EC) unless the registry names
-# others, so FEX's DLLs are installed under their own names and as those two,
-# replacing the stubs `make install` put there.
+# FEX as build-fex.sh staged it in FEX_DIST, as the preflight checked: its
+# emulator DLLs and their unix halves. Wine loads its x86 emulators as
+# xtajit.dll (i386 under WoW64) and xtajit64.dll (x86_64 as ARM64EC) unless
+# the registry names others, so FEX's DLLs are installed under their own
+# names and as those two, replacing the stubs `make install` put there.
 time_mark "Step 4d: FEX"
 echo "==> Step 4d: FEX"
-for t in wow64 arm64ec unixlib; do
-    if [ ! -f "$FEX_BUILD_DIR/$t/build.ninja" ]; then
-        echo "Error: no FEX build at $FEX_BUILD_DIR/$t (run build-wine.sh)"
-        exit 1
-    fi
-    cmake --install "$FEX_BUILD_DIR/$t" --prefix "$TMP_DIR/fex" >/dev/null
-done
-fexpe="$TMP_DIR/fex/lib/wine/$PE64_DIR"
-fexunix="$TMP_DIR/fex/lib/wine/$UNIX_DIR"
-for f in "$fexpe/libwow64fex.dll" "$fexpe/libarm64ecfex.dll" \
-         "$fexunix/libwow64fex.so" "$fexunix/libarm64ecfex.so"; do
-    if [ ! -f "$f" ]; then
-        echo "Error: the FEX install has no $(basename "$f")"
-        exit 1
-    fi
-done
+echo "    $FEX_DIST"
+fexpe="$FEX_DIST/$PE64_DIR"
+fexunix="$FEX_DIST/$UNIX_DIR"
 echo "    $PE64_DIR/libwow64fex.dll, xtajit.dll"
 cp "$fexpe/libwow64fex.dll" "$WINE_DIR/lib/wine/$PE64_DIR/"
 cp "$fexpe/libwow64fex.dll" "$WINE_DIR/lib/wine/$PE64_DIR/xtajit.dll"

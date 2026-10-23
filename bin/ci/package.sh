@@ -28,7 +28,7 @@ set -e
 # notes.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# BUNDLE_DEST, WINE_SRC, WINE_SDK_DIR, FEX_BUILD_DIR, MESA_DIST, DXMT_DIST,
+# BUNDLE_DEST, WINE_SRC, WINE_SDK_DIR, FEX_DIST, MESA_DIST, DXMT_DIST,
 # VKD3D_PROTON_DIST, the repositories and wine_src_commit.
 # shellcheck source=../lib/profile.sh
 . "$SCRIPT_DIR/lib/profile.sh"
@@ -195,7 +195,7 @@ else
     describe=${describe%-g*}
     wine_ref=$(tr -d '[:space:]' < "$PINS_DIR/wine-src.ref")
     wine_repo=$(github_name "$(git -C "$WINE_SRC" remote get-url origin)")
-    for f in "$FEX_BUILD_DIR/COMMIT" "$MESA_DIST/COMMIT" "$DXMT_DIST/COMMIT" \
+    for f in "$FEX_DIST/COMMIT" "$MESA_DIST/COMMIT" "$DXMT_DIST/COMMIT" \
              "$VKD3D_PROTON_DIST/COMMIT"; do
         if [ ! -s "$f" ]; then
             echo "Error: no $f (run build-wine.sh)"
@@ -210,7 +210,7 @@ else
     {
         echo "Wine distribution built from $wine_repo@$wine_ref ($(short "$wine_commit"), $describe) with $self."
         echo ""
-        echo "- FEX: $(github_name "$FEX_REPO")@$(tr -d '[:space:]' < "$PINS_DIR/fex-src.ref") ($(short "$(cat "$FEX_BUILD_DIR/COMMIT")"))"
+        echo "- FEX: $(github_name "$FEX_REPO")@$(tr -d '[:space:]' < "$PINS_DIR/fex-src.ref") ($(short "$(cat "$FEX_DIST/COMMIT")"))"
         echo "- Mesa: $(github_name "$MESA_REPO")@$(tr -d '[:space:]' < "$PINS_DIR/mesa-src.ref") ($(short "$(cat "$MESA_DIST/COMMIT")"))"
         echo "- DXMT: $(github_name "$DXMT_REPO")@$(tr -d '[:space:]' < "$PINS_DIR/dxmt-src.ref") ($(short "$(cat "$DXMT_DIST/COMMIT")"))"
         echo "- vkd3d-proton: $(github_name "$VKD3D_PROTON_REPO")@$(tr -d '[:space:]' < "$PINS_DIR/vkd3d-proton-src.ref") ($(short "$(cat "$VKD3D_PROTON_DIST/COMMIT")"))"
